@@ -3,11 +3,15 @@ import { readFileSync, statSync, writeFileSync, mkdirSync, existsSync } from "no
 import { homedir } from "node:os"
 import { dirname, join } from "node:path"
 
-const CONFIG_DIR = process.env.XDG_CONFIG_HOME
-  ? join(process.env.XDG_CONFIG_HOME, "opencode")
-  : join(homedir(), ".config", "opencode")
+const HOME_DIR = process.env.OPENCODE_TEST_HOME || process.env.HOME || process.env.USERPROFILE || homedir()
+
+const CONFIG_DIR =
+  process.env.OPENCODE_CONFIG_HOME ||
+  process.env.OPENCODE_CONFIG_DIR ||
+  (process.env.XDG_CONFIG_HOME ? join(process.env.XDG_CONFIG_HOME, "opencode") : join(HOME_DIR, ".config", "opencode"))
 
 const IDENTITY_FILE = process.env.OPENCODE_UNLIMITED_IDENTITY || join(CONFIG_DIR, "identity.json")
+const UNLIMITED_IDENTITY_FILE = join(CONFIG_DIR, "unlimited-identity.json")
 const STATE_FILE = process.env.OPENCODE_UNLIMITED_STATE || join(CONFIG_DIR, "unlimited.json")
 const MARKER_FILE = join(CONFIG_DIR, "unlimited-shield.state.json")
 
@@ -37,9 +41,23 @@ function projectId() {
   const now = Date.now()
   if (now - identityAt < CACHE_MS) return identityId
   identityAt = now
-  const parsed = readJson(IDENTITY_FILE)
-  const raw = typeof parsed?.projectId === "string" ? parsed.projectId.trim().toLowerCase() : ""
-  identityId = PROJECT_ID_RE.test(raw) ? raw : null
+
+  for (const file of [IDENTITY_FILE, UNLIMITED_IDENTITY_FILE]) {
+    const parsed = readJson(file)
+    if (!parsed) continue
+    const raw = typeof parsed.projectId === "string" ? parsed.projectId.trim().toLowerCase() : ""
+    if (PROJECT_ID_RE.test(raw)) {
+      identityId = raw
+      return identityId
+    }
+    const dev = typeof parsed.deviceId === "string" ? parsed.deviceId.trim() : ""
+    if (dev) {
+      identityId = createHash("sha256").update(dev).digest("hex").slice(0, 40)
+      return identityId
+    }
+  }
+
+  identityId = null
   return identityId
 }
 

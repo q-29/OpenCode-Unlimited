@@ -6,54 +6,7 @@ on:
   pull_request:
 
 jobs:
-  check-windows:
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: node syntax
-        shell: pwsh
-        run: |
-          Get-ChildItem -Recurse -File -Include *.js | ForEach-Object { node --check $_.FullName }
-          node --check bin/opencode-unlimited
-
-      - name: powershell syntax
-        shell: pwsh
-        run: |
-          $failed = 0
-          foreach ($file in @("bin/opencode-unlimited.ps1", "install.ps1")) {
-            $errors = $null
-            [void][System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $file).Path, [ref]$null, [ref]$errors)
-            if ($errors.Count -gt 0) {
-              $failed = 1
-              $errors | ForEach-Object { Write-Host "$file : $($_.Message)" }
-            } else {
-              Write-Host "$file : ok"
-            }
-          }
-          exit $failed
-
-      - name: ascii only
-        shell: pwsh
-        run: |
-          $bad = 0
-          Get-ChildItem -Recurse -File -Include *.ps1, *.js, *.cmd, *.sh | ForEach-Object {
-            $text = [System.IO.File]::ReadAllText($_.FullName)
-            $count = ($text.ToCharArray() | Where-Object { [int]$_ -gt 127 }).Count
-            if ($count -gt 0) {
-              $bad = 1
-              Write-Host "$($_.Name): $count non-ascii characters"
-            }
-          }
-          exit $bad
-
-      - name: cli responds
-        shell: pwsh
-        run: |
-          powershell -NoProfile -ExecutionPolicy Bypass -File bin/opencode-unlimited.ps1 help
-          node bin/opencode-unlimited help
-
-  check-posix:
+  check-macos:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
@@ -74,8 +27,12 @@ jobs:
           bash -n install.sh
           bash -n scripts/release.sh
 
+      - name: tests
+        run: npm test
+
       - name: cli responds
         run: |
           chmod +x bin/opencode-unlimited install.sh
           ./bin/opencode-unlimited help
-
+          ./bin/opencode-unlimited version
+          ./bin/opencode-unlimited doctor

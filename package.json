@@ -1,0 +1,17 @@
+{
+  "name": "opencode-unlimited",
+  "version": "1.0.2",
+  "description": "macOS CLI that rotates a local device id, clears stored free-limit errors, re-ids sessions, and walks a proxy pool for OpenCode.",
+  "private": true,
+  "license": "MIT",
+  "bin": {
+    "opencode-unlimited": "bin/opencode-unlimited"
+  },
+  "engines": {
+    "node": ">=22.5"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.js",
+    "check": "for f in lib/*.js plugins/*.js bin/opencode-unlimited; do node --check \"$f\"; done"
+  }
+}

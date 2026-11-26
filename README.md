@@ -1,9 +1,6 @@
 # OpenCode-Unlimited
 
-## Repository is no longer maintained
-# Use [LarpCode](https://github.com/Tazmyan/LarpCode) instead
-
-Fixes OpenCode's daily free-message limit from the command line: shows the real meter, watches the log for the exact moment a limit lands, clears the stale limit banner, rotates a local device id, and moves you onto a fresh network exit when you ask it to. Works natively on macOS, Linux, and Windows 10/11.
+Fixes OpenCode's daily free-message limit from the command line: shows the real meter, watches the log for the exact moment a limit lands, clears the stale limit banner, rotates a local device id, and moves you onto a fresh network exit when you ask it to. **macOS only.**
 
 Nothing here writes to your registry, deletes a chat, or loses a message.
 
@@ -22,7 +19,7 @@ opencode-unlimited reset "/path/to/project"
 
 ## Install
 
-### macOS / Linux
+### macOS
 
 ```bash
 git clone https://github.com/Tazmyan/OpenCode-Unlimited.git
@@ -31,28 +28,31 @@ chmod +x install.sh
 ./install.sh
 ```
 
-### Windows
-
-```powershell
-git clone https://github.com/Tazmyan/OpenCode-Unlimited.git
-cd OpenCode-Unlimited
-powershell -ExecutionPolicy Bypass -File .\install.ps1
-```
-
-Open a new terminal afterwards so `opencode-unlimited` is on PATH.
+Open a new terminal afterwards so `opencode-unlimited` is on PATH. The installer symlinks the CLI into `~/.local/bin`, `/opt/homebrew/bin`, or `/usr/local/bin` (whichever exists and is writable) and appends the repo `bin/` dir to your shell profile as a fallback.
 
 - No admin rights.
 - No registry writes.
 - No proxy set behind your back.
 - The plugin is only installed by `opencode-unlimited on`, and `off` takes it back out.
 
-Needs Node.js 22.5 or newer, only because the session tools use Node's built-in SQLite reader.
+Needs Node.js 22.5 or newer, only because the session tools use Node's built-in SQLite reader. On macOS: `brew install node`.
+
+Paths used on macOS:
+
+| What | Where |
+|---|---|
+| Config + state | `~/.config/opencode/` |
+| Database | `~/Library/Application Support/opencode/opencode.db` |
+| Model cache | `~/Library/Caches/opencode/models.json` |
+| Logs | `~/Library/Logs/opencode/opencode.log` |
+| App state | `~/Library/Application Support/opencode-unlimited/` |
+| Autostart | `~/Library/LaunchAgents/ai.opencode.unlimited.watch.plist` |
 
 ---
 
 ## One command: `on`
 
-```powershell
+```bash
 opencode-unlimited on
 ```
 
@@ -64,19 +64,21 @@ It runs one pass and leaves the machine in a working state:
 4. Loads a proxy list if the pool is empty.
 5. Hunts for an exit whose address block is not spent, screening every candidate before it touches OpenCode.
 6. Clears the stored "free limit" rows in **every** session, not just the current folder, then re-ids the sessions in this folder without touching messages.
-7. Installs the shield plugin, starts the background watcher, and registers it to start at logon.
+7. Installs the shield plugin, starts the background watcher, and registers it to start at logon via `launchd`.
 
 Then it prints the address you are leaving from and stops. From that point the watcher reads the log and rotates on its own when a limit line lands.
 
-```powershell
-opencode-unlimited on -KeepId      # keep the current device id
-opencode-unlimited on -NoProbe     # do not spend a probe message on the route
-opencode-unlimited on -NoStart     # set everything up, do not start the watcher
-opencode-unlimited on -KeepRoute   # leave the network path alone
-opencode-unlimited off             # stop watcher, remove autostart, direct egress
+```bash
+opencode-unlimited on --keep-id      # keep the current device id
+opencode-unlimited on --no-probe     # do not spend a probe message on the route
+opencode-unlimited on --no-start     # set everything up, do not start the watcher
+opencode-unlimited on --keep-route   # leave the network path alone
+opencode-unlimited off               # stop watcher, remove autostart, direct egress
 ```
 
-`off` stops the watcher, removes the logon task, unlists the plugin and puts the service back on a direct connection. It does not touch sessions, messages, or the identity file.
+`off` stops the watcher, removes the `launchd` agent, unlists the plugin and puts the service back on a direct connection. It does not touch sessions, messages, or the identity file.
+
+Legacy PowerShell-style flags (`-KeepId`, `-NoProbe`, `-NoStart`, `-KeepRoute`, `-Dry`, `-Db`, `-Fix`, `-Follow`, `-Auto`, `-Background`, `-Country`, `-Limit`, `-Top`, `-Check`, `-KeepIds`) are still accepted, so old scripts keep working.
 
 ---
 
@@ -113,8 +115,8 @@ Step by step:
    Check that it actually changed with `opencode-unlimited block` — it prints the address you are leaving from right now.
 3. **Run the reset.**
 
-   ```powershell
-   opencode-unlimited reset "C:\my\project"
+   ```bash
+   opencode-unlimited reset "/my/project"
    ```
 
    That rotates the local device id, removes the stored limit errors, re-ids the sessions in that folder without touching their messages, and switches to the next proxy in your pool if you added one. It also prints the egress address before and after, so you can see whether the IP really moved.
@@ -128,15 +130,15 @@ Do not use a 121 MB chat for the first test message after a reset. A long sessio
 
 You do not have to notice the limit yourself:
 
-```powershell
+```bash
 opencode-unlimited watch            # read the log once, spend nothing
-opencode-unlimited watch -follow    # keep tailing it
-opencode-unlimited watch -follow -auto   # tail, and rotate the moment it lands
+opencode-unlimited watch --follow   # keep tailing it
+opencode-unlimited watch --follow --auto   # tail, and rotate the moment it lands
 ```
 
-`watch` reads OpenCode's own log, so it costs zero messages. It only treats a line as a real limit when the line starts with `level=ERROR` — the log also records command text, and a naive text match would fire on any command that mentions the phrase. `-auto` verifies the new route with one probe message, deletes the probe session afterwards, and stops once the route is open. Rotation is capped at five moves per thirty minutes.
+`watch` reads OpenCode's own log, so it costs zero messages. It only treats a line as a real limit when the line starts with `level=ERROR` — the log also records command text, and a naive text match would fire on any command that mentions the phrase. `--auto` verifies the new route with one probe message, deletes the probe session afterwards, and stops once the route is open. Rotation is capped at five moves per thirty minutes.
 
-Running `opencode-unlimited on` starts exactly this watcher in the background and adds the logon task, so you do not have to keep a terminal open.
+Running `opencode-unlimited on` starts exactly this watcher in the background and adds the `launchd` agent, so you do not have to keep a terminal open.
 
 ### The shield plugin
 
@@ -146,7 +148,7 @@ It is not a quota lever — the limit is per address block, as the section below
 
 Check it directly instead of trusting a file on disk:
 
-```powershell
+```bash
 opencode-unlimited plugin          # state, path, config entry, live hook list
 opencode-unlimited plugin install  # install and list it again
 opencode-unlimited plugin off      # unlist it and park the file
@@ -161,39 +163,39 @@ OpenCode reloads its config on save, so the plugin appears without a restart. `p
 | Command | What it does |
 |---|---|
 | `opencode-unlimited on` | Full auto: identity, model, pool, verified route, sessions, plugin, watcher, autostart |
-| `opencode-unlimited on -KeepId -NoProbe` | Same, but keep the identity and skip the probe message |
+| `opencode-unlimited on --keep-id --no-probe` | Same, but keep the identity and skip the probe message |
 | `opencode-unlimited off` | Stop watcher, remove autostart, unlist plugin, direct egress |
 | `opencode-unlimited usage` | Meter state for today and the reset clock |
-| `opencode-unlimited usage -check` | Same, plus one real message through the app |
+| `opencode-unlimited usage --check` | Same, plus one real message through the app |
 | `opencode-unlimited watch` | Read the log for a limit line, no message spent |
-| `opencode-unlimited watch -follow` | Keep tailing the log |
-| `opencode-unlimited watch -follow -auto` | Tail, then rotate when a limit lands |
+| `opencode-unlimited watch --follow` | Keep tailing the log |
+| `opencode-unlimited watch --follow --auto` | Tail, then rotate when a limit lands |
 | `opencode-unlimited hunt` | Rotate until the probe says the route is open |
-| `opencode-unlimited hunt -Country DE -Prefix 2a00:` | Steer the search |
+| `opencode-unlimited hunt --country DE --prefix 2a00:` | Steer the search |
 | `opencode-unlimited token` | Show the local `auth.json` snapshot state |
 | `opencode-unlimited token save` | Keep a local copy of `auth.json` |
 | `opencode-unlimited token restore` | Put it back after the app drops it |
 | `opencode-unlimited block` | Egress addresses seen today and which are spent |
 | `opencode-unlimited block check` | Is the address you are on now still usable |
 | `opencode-unlimited reset` | New device id, clear stored errors, verify |
-| `opencode-unlimited reset "C:\path"` | Same, plus re-id every session in that folder |
-| `opencode-unlimited reset "C:\path" -Dry` | Preview everything, write nothing |
-| `opencode-unlimited reset "C:\path" -KeepIds` | Rotate the device id only |
+| `opencode-unlimited reset "/path"` | Same, plus re-id every session in that folder |
+| `opencode-unlimited reset "/path" --dry` | Preview everything, write nothing |
+| `opencode-unlimited reset "/path" --keep-ids` | Rotate the device id only |
 | `opencode-unlimited identity` | Show the virtual device id and its generation |
 | `opencode-unlimited identity rotate` | Mint a new virtual device id |
 | `opencode-unlimited identity restore` | Remove the shim file, registry untouched |
 | `opencode-unlimited sessions` | List sessions with ids, folders and sizes |
-| `opencode-unlimited sessions "C:\path"` | Only that folder |
+| `opencode-unlimited sessions "/path"` | Only that folder |
 | `opencode-unlimited reid ses_abc...` | New session id, every message kept |
-| `opencode-unlimited reid "C:\path"` | Re-id every session in that folder |
-| `opencode-unlimited reid "C:\path" -Dry` | Show old ids, sizes and row counts |
+| `opencode-unlimited reid "/path"` | Re-id every session in that folder |
+| `opencode-unlimited reid "/path" --dry` | Show old ids, sizes and row counts |
 | `opencode-unlimited model` | Providers with credentials and their free models |
 | `opencode-unlimited model provider/model` | Switch this folder |
 | `opencode-unlimited model ses_abc... provider/model` | Switch one session |
 | `opencode-unlimited clear` | Strip stored "free limit" errors everywhere |
-| `opencode-unlimited clear "C:\path"` | Same, scoped to a folder |
+| `opencode-unlimited clear "/path"` | Same, scoped to a folder |
 | `opencode-unlimited verify` | Check for orphaned rows and invalid state |
-| `opencode-unlimited verify -fix` | Repair what it found |
+| `opencode-unlimited verify --fix` | Repair what it found |
 | `opencode-unlimited status` | Runtime, identity, network, ledger |
 | `opencode-unlimited doctor` | Node, service, schema, plugin, egress |
 | `opencode-unlimited version` | Tool version plus detected OpenCode version |
@@ -203,7 +205,7 @@ OpenCode reloads its config on save, so the plugin appears without a restart. `p
 | `opencode-unlimited proxy pool fetch <url>` | Pull a free proxy list into the pool |
 | `opencode-unlimited proxy pool refresh` | Refetch the list now |
 | `opencode-unlimited proxy stats` | Per-proxy health, latency, failure count, quarantine |
-| `opencode-unlimited proxy test -Top 20` | Probe the pool and park the dead ones |
+| `opencode-unlimited proxy test --top 20` | Probe the pool and park the dead ones |
 | `opencode-unlimited proxy healthreset` | Forget every health record |
 | `opencode-unlimited plugin` | Is the shield loaded, and where it lives |
 | `opencode-unlimited plugin install\|off` | List or unlist it in the OpenCode config |
@@ -216,16 +218,16 @@ Inside the chat, the same actions as slash commands:
 
 ```
 opencode-unlimited
-opencode-unlimited:reset C:\Users\you\projects\my-app
+opencode-unlimited:reset /Users/you/projects/my-app
 opencode-unlimited:identity rotate
 opencode-unlimited:block
 opencode-unlimited:usage
-opencode-unlimited:watch -follow -auto
-opencode-unlimited:hunt -Country DE
+opencode-unlimited:watch --follow --auto
+opencode-unlimited:hunt --country DE
 opencode-unlimited:token save
-opencode-unlimited:reid C:\Users\you\projects\my-app
+opencode-unlimited:reid /Users/you/projects/my-app
 opencode-unlimited:model openrouter/deepseek/deepseek-v4.1-flash
-opencode-unlimited:clear C:\Users\you\projects\my-app
+opencode-unlimited:clear /Users/you/projects/my-app
 ```
 
 Colon separator, so they sort together and do not collide with other plugins.
@@ -255,7 +257,7 @@ The window is a wall clock, not a rolling one. `Retry-After` always lands on the
 
 Manual IP changes work fine. If you have a few proxies and want `reset` to walk them for you:
 
-```powershell
+```bash
 opencode-unlimited proxy pool add socks5://127.0.0.1:1080
 opencode-unlimited proxy pool add http://user:pass@10.0.0.1:3128
 opencode-unlimited proxy pool
@@ -265,9 +267,9 @@ From then on, `reset` and `hunt` walk it: each candidate is measured through the
 
 Every proxy also carries a health record:
 
-```powershell
+```bash
 opencode-unlimited proxy stats        # ranking, latency, failures, quarantine
-opencode-unlimited proxy test -Top 20 # probe now, park what is dead
+opencode-unlimited proxy test --top 20 # probe now, park what is dead
 opencode-unlimited proxy healthreset  # clean slate
 ```
 
@@ -275,14 +277,14 @@ Two failures in a row park a proxy for five minutes, and the wait doubles on eve
 
 You can also point it at a public list and let it shuffle:
 
-```powershell
+```bash
 opencode-unlimited proxy pool fetch https://example.com/proxies.txt
 opencode-unlimited proxy pool refresh
 ```
 
 The list is parsed for every `ip:port` in it, capped at 200 candidates, cached for six hours, and health-tested one at a time as rotation walks it. An empty or truncated response is rejected instead of poisoning the pool.
 
-```powershell
+```bash
 opencode-unlimited proxy next        # walk one step now
 opencode-unlimited proxy pool clear  # forget the pool and the cached list
 ```
@@ -295,12 +297,12 @@ SOCKS5 proxies go through a small local bridge, because the OpenCode service spe
 
 `reset` does six things:
 
-1. **Device id** — a virtual id stored in `~/.config/opencode/unlimited-identity.json` and `%LOCALAPPDATA%\opencode-unlimited\shim\machine-guid.txt`. It **never** writes `HKLM\SOFTWARE\Microsoft\Cryptography\MachineGuid`. `identity restore` deletes the shim and your real machine guid is still exactly where it was.
+1. **Device id** — a virtual id stored in `~/.config/opencode/unlimited-identity.json` and `~/Library/Application Support/opencode-unlimited/shim/machine-guid.txt`. It **never** writes a real machine id. `identity restore` deletes the shim and your real machine id is still exactly where it was.
 2. **Stored limit errors** — removes the `provider.free-limit` rows a failed prompt left in your history, and flips the session outcome back to succeeded. No rows deleted.
 3. **Session ids** — one transaction per session, every message and part row re-pointed, the event counter moved along with the id so the app keeps numbering above the messages it kept, row counts compared before and after, rollback on mismatch.
-4. **Egress route** — next proxy in the pool, if you have one. With `-Hunt`, it keeps rotating until a probe answers, instead of taking the next entry on trust.
+4. **Egress route** — next proxy in the pool, if you have one. With `--hunt`, it keeps rotating until a probe answers, instead of taking the next entry on trust.
 5. **Egress block** — measures the address you are leaving from, records it with its country in a local ledger, and compares the `/32` or `/64` block, not the literal string. Two addresses in one IPv6 `/64` are the same bucket and are now reported as such.
-6. **Database** — `verify -fix`: invalid idle flags, duplicate project folders.
+6. **Database** — `verify --fix`: invalid idle flags, duplicate project folders.
 
 Restarting the background service never touches sessions. `clear` never deletes a session or a message row. A re-id is not a refill; it gives the session a clean new identity and keeps its content.
 
@@ -318,19 +320,19 @@ Restart the app so the session reloads from disk.
 Your VPN, hotspot, or router handed you an address inside the same block — for IPv6 that means the same `/64`, which string comparison would have missed. Same block, same bucket. Change the connection and run it again, or wait for 00:00 UTC.
 
 **`watch` finds nothing.**
-It starts at the end of the log on the first run, so it only sees what happens next. Pass `-all` to rescan the recent backlog, and make sure OpenCode has written a log at least once.
+It starts at the end of the log on the first run, so it only sees what happens next. Pass `--all` to rescan the recent backlog, and make sure OpenCode has written a log at least once.
 
-**`watch -auto` rotated but the prompt still fails.**
+**`watch --auto` rotated but the prompt still fails.**
 The watcher moved the route and verified it with a probe. If the chat was open the whole time, it kept the old connection; send the prompt again or restart the app.
 
 **`sessions` prints nothing for a folder.**
-Run `opencode-unlimited doctor`. It prints the database path and the detected session table. Folder matching ignores case and slash direction.
+Run `opencode-unlimited doctor`. It prints the database path and the detected session table. Folder matching ignores case and slash direction, and resolves macOS symlinks (`/tmp` → `/private/tmp`, `/var` → `/private/var`) before comparing.
 
 **A re-id felt slow on a big folder.**
-Each session is its own transaction and the history is rewritten in place. A 200 MB folder takes a few seconds. Use `-Dry` first.
+Each session is its own transaction and the history is rewritten in place. A 200 MB folder takes a few seconds. Use `--dry` first.
 
 **An old session fails with a SQLite `insert into "session_message"` error after a re-id.**
-A re-id from an older build moved the session id but left its event counter behind, so the app restarted numbering at 1 and collided with a message it had already kept. Close OpenCode, run `opencode-unlimited verify -fix`, then reopen the chat. `verify` alone shows the drift without writing anything.
+A re-id from an older build moved the session id but left its event counter behind, so the app restarted numbering at 1 and collided with a message it had already kept. Close OpenCode, run `opencode-unlimited verify --fix`, then reopen the chat. `verify` alone shows the drift without writing anything.
 
 **Everything looks fine but prompts fail.**
 Compare `opencode-unlimited usage` with the exit address your VPN reports. Leaking DNS or an IPv6 route can keep you on the old block.
@@ -354,7 +356,7 @@ Open an issue with the command you ran and the output. That is enough to start. 
 Educational and research use only. Not affiliated with, endorsed by, or supported by OpenCode or any of their partners; all trademarks belong to their owners.
 
 - It unlocks no entitlement. The free limit is enforced by OpenCode's servers and stays in force.
-- It does not modify your machine id, your registry, or any system identifier. The identity it rotates is a local file the tool owns.
+- It does not modify your machine id or any system identifier. The identity it rotates is a local file the tool owns.
 - Using it may break a provider's terms of service. That is your responsibility, and so is any consequence, including account restrictions.
 - Provided "as is", with no warranty and no liability for damage, data loss or account action. Use at your own risk.
 - Rights holder and want it gone? Open an issue and it gets removed promptly, no argument.

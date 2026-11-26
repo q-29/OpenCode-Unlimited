@@ -1,95 +1,98 @@
 #!/usr/bin/env node
+"use strict";
 
 const fs = require("node:fs");
 const path = require("node:path");
 const os = require("node:os");
 const crypto = require("node:crypto");
-const childProcess = require("node:child_process");
+const { execFileSync, spawn, spawnSync } = require("node:child_process");
+const { DatabaseSync } = require("node:sqlite");
 
-const userHome = os.homedir();
-const configDir = process.env.XDG_CONFIG_HOME
-  ? path.join(process.env.XDG_CONFIG_HOME, "opencode")
-  : path.join(userHome, ".config", "opencode");
+// Resolve the real script location so symlinks in /usr/local/bin,
+// /opt/homebrew/bin or ~/.local/bin still find lib/ and plugins/.
+const scriptPath = fs.realpathSync(__filename);
+const scriptDir = path.dirname(scriptPath);
+let rootDir = path.dirname(scriptDir);
+if (!fs.existsSync(path.join(rootDir, "lib", "paths.js"))) rootDir = scriptDir;
 
-function resolveDataDir() {
-  if (process.env.XDG_DATA_HOME) {
-    const p = path.join(process.env.XDG_DATA_HOME, "opencode");
-    if (fs.existsSync(p)) return p;
-  }
-  const localShare = path.join(userHome, ".local", "share", "opencode");
-  if (fs.existsSync(localShare)) return localShare;
-  const appSupport = path.join(userHome, "Library", "Application Support", "opencode");
-  if (fs.existsSync(appSupport)) return appSupport;
-  return localShare;
-}
+const paths = require(path.join(rootDir, "lib", "paths.js"));
+const jsonc = require(path.join(rootDir, "lib", "jsonc.js"));
+const identity = require(path.join(rootDir, "lib", "identity.js"));
+const ocInfo = require(path.join(rootDir, "lib", "oc-info.js"));
+const egress = require(path.join(rootDir, "lib", "egress.js"));
+const logWatch = require(path.join(rootDir, "lib", "log-watch.js"));
+const proxyHealth = require(path.join(rootDir, "lib", "proxy-health.js"));
+const proxyHunt = require(path.join(rootDir, "lib", "proxy-hunt.js"));
+const watcher = require(path.join(rootDir, "lib", "watcher.js"));
+const dbTools = require(path.join(rootDir, "lib", "db-tools.js"));
+const sessionReid = require(path.join(rootDir, "lib", "session-reid.js"));
+const modelSwitch = require(path.join(rootDir, "lib", "model-switch.js"));
+const proxyBridge = require(path.join(rootDir, "lib", "proxy-bridge.js"));
 
-const dataDir = resolveDataDir();
+const configDir = paths.configDir();
+const homeDir = paths.homeDir();
 const stateFile = path.join(configDir, "unlimited.json");
-const identityFile = path.join(configDir, "identity.json");
-const legacyIdentity = path.join(userHome, ".opencode", "identity.json");
 const pluginDir = path.join(configDir, "plugins");
 const pluginFolder = path.join(pluginDir, "unlimited-shield");
 const pluginFile = path.join(pluginFolder, "index.js");
 const pluginEntry = "./plugins/unlimited-shield";
 const pluginMarker = path.join(configDir, "unlimited-shield.state.json");
-const pidFile = path.join(configDir, "unlimited-bridge.pid");
-const logFile = path.join(configDir, "unlimited-bridge.log");
+const bridgePidFile = path.join(configDir, "unlimited-bridge.pid");
+const bridgeLogFile = path.join(configDir, "unlimited-bridge.log");
 const ipCacheFile = path.join(configDir, "unlimited-ip.json");
+const authSnapshotFile = path.join(configDir, "unlimited-auth-snapshot.json");
 const gateway = "https://opencode.ai/inference/openai/v1/chat/completions";
 const traceUrl = "https://cloudflare.com/cdn-cgi/trace";
 const defaultModel = "deepseek-v4.1-flash-free";
 const defaultBridgePort = 8899;
-
-const scriptDir = __dirname;
-let rootDir = path.dirname(scriptDir);
-if (!fs.existsSync(path.join(rootDir, "lib", "proxy-bridge.js"))) {
-  rootDir = scriptDir;
-}
 const bridgeJs = path.join(rootDir, "lib", "proxy-bridge.js");
 const bundledPlugin = path.join(rootDir, "plugins", "unlimited-shield.js");
+
+function toolVersion() {
+  try {
+    const pkg = JSON.parse(fs.readFileSync(path.join(rootDir, "package.json"), "utf8"));
+    if (pkg && typeof pkg.version === "string") return pkg.version;
+  } catch {
+    void 0;
+  }
+  return "1.0.2";
+}
 
 function writeStep(text) {
   console.log(text);
 }
-
 function writeOk(text) {
-  console.log(`  \x1b[32m[+]\x1b[0m ${text}`);
+  console.log("  \x1b[32m[+]\x1b[0m " + text);
 }
-
 function writeWarn(text) {
-  console.log(`  \x1b[33m[!]\x1b[0m ${text}`);
+  console.log("  \x1b[33m[!]\x1b[0m " + text);
 }
-
 function writeBad(text) {
-  console.log(`  \x1b[31m[x]\x1b[0m ${text}`);
+  console.log("  \x1b[31m[x]\x1b[0m " + text);
 }
-
 function writeInfo(text) {
-  console.log(`      \x1b[90m${text}\x1b[0m`);
+  console.log("      \x1b[90m" + text + "\x1b[0m");
 }
 
 function newHex(bytes) {
   return crypto.randomBytes(bytes).toString("hex");
 }
 
-function readTextFile(p) {
+function readTextFile(file) {
   try {
-    return fs.readFileSync(p, "utf8").replace(/^\uFEFF/, "");
+    return fs.readFileSync(file, "utf8").replace(/^\uFEFF/, "");
   } catch {
     return null;
   }
 }
 
-function writeTextFile(p, text) {
-  const dir = path.dirname(p);
-  if (!fs.existsSync(dir)) {
-    fs.mkdirSync(dir, { recursive: true });
-  }
-  fs.writeFileSync(p, text, "utf8");
+function writeTextFile(file, text) {
+  paths.ensureDir(path.dirname(file));
+  fs.writeFileSync(file, text, "utf8");
 }
 
-function getJson(p) {
-  const raw = readTextFile(p);
+function getJson(file) {
+  const raw = readTextFile(file);
   if (!raw) return null;
   try {
     return JSON.parse(raw);
@@ -100,24 +103,20 @@ function getJson(p) {
 
 function getConfig() {
   const cfg = {
-    identityPath: identityFile,
-    pluginPath: pluginFile,
-    model: defaultModel,
-    orgId: "",
     proxy: "",
     bridgePort: defaultBridgePort,
     ipMode: "manual",
-    rotateDb: false,
+    model: defaultModel,
+    orgId: "",
     lastIp: "",
     lastBucket: "",
-    updatedAt: ""
+    poolIndex: 0,
+    updatedAt: "",
   };
   const saved = getJson(stateFile);
   if (saved && typeof saved === "object") {
     for (const key of Object.keys(cfg)) {
-      if (saved[key] !== undefined && saved[key] !== null) {
-        cfg[key] = saved[key];
-      }
+      if (saved[key] !== undefined && saved[key] !== null) cfg[key] = saved[key];
     }
   }
   return cfg;
@@ -128,565 +127,369 @@ function saveConfig(cfg) {
   writeTextFile(stateFile, JSON.stringify(cfg, null, 2) + "\n");
 }
 
-function resolveOpenCode() {
-  try {
-    const whichCmd = process.platform === "win32" ? "where opencode" : "which opencode";
-    const out = childProcess.execSync(whichCmd, {
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "ignore"]
-    }).trim().split(/\r?\n/)[0];
-    if (out && fs.existsSync(out)) return out;
-  } catch {}
-
-  const candidates = [
-    path.join(userHome, ".opencode", "bin", "opencode"),
-    "/usr/local/bin/opencode",
-    "/opt/homebrew/bin/opencode",
-    path.join(userHome, ".bun", "bin", "opencode"),
-    path.join(userHome, ".local", "bin", "opencode"),
-    path.join(userHome, "bin", "opencode")
-  ];
-
-  if (process.platform === "win32") {
-    if (process.env.APPDATA) {
-      candidates.push(path.join(process.env.APPDATA, "npm", "opencode.cmd"));
-      candidates.push(path.join(process.env.APPDATA, "npm", "opencode.exe"));
-    }
-    if (process.env.LOCALAPPDATA) {
-      candidates.push(path.join(process.env.LOCALAPPDATA, "Programs", "opencode", "opencode.exe"));
-    }
-    candidates.push("C:\\Program Files\\opencode\\opencode.exe");
-  }
-
-  for (const c of candidates) {
-    if (fs.existsSync(c)) return c;
-  }
-  return "opencode";
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function getCurl() {
+function findCurl() {
+  for (const candidate of ["/usr/bin/curl", "/usr/local/bin/curl", "/opt/homebrew/bin/curl"]) {
+    if (fs.existsSync(candidate)) return candidate;
+  }
   try {
-    const cmd = process.platform === "win32" ? "where curl.exe" : "which curl";
-    const out = childProcess.execSync(cmd, {
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "ignore"]
-    }).trim().split(/\r?\n/)[0];
-    if (out && fs.existsSync(out)) return out;
-  } catch {}
+    const out = execFileSync("/usr/bin/which", ["curl"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+    const first = String(out || "").trim().split(/\r?\n/)[0];
+    if (first && fs.existsSync(first)) return first;
+  } catch {
+    void 0;
+  }
   return "";
 }
 
-function invokeCurl(args) {
-  const curl = getCurl();
-  if (!curl) return null;
+function invokeCurl(args, timeoutMs) {
+  const curl = findCurl();
+  if (!curl) return "";
   try {
-    const res = childProcess.spawnSync(curl, args, { encoding: "utf8", timeout: 25000 });
-    return res.stdout || "";
+    const res = spawnSync(curl, args, { encoding: "utf8", timeout: Number(timeoutMs || 25000) });
+    return String(res.stdout || "");
   } catch {
     return "";
   }
 }
 
-function getEgressIp(proxyUrl, force = false) {
+function parseTrace(text) {
+  const out = {};
+  for (const line of String(text || "").split(/\r?\n/)) {
+    const eq = line.indexOf("=");
+    if (eq < 0) continue;
+    out[line.slice(0, eq).trim()] = line.slice(eq + 1).trim();
+  }
+  return out;
+}
+
+function getEgressIp(proxyUrl, force) {
   const cache = getJson(ipCacheFile);
   if (!force && cache && cache.ip && cache.ip !== "unavailable") {
-    const now = Math.floor(Date.now() / 1000);
-    const age = now - (cache.at || 0);
-    if (age >= 0 && age < 60 && String(cache.via || "") === String(proxyUrl || "")) {
-      return cache.ip;
-    }
+    const age = Math.floor(Date.now() / 1000) - Number(cache.at || 0);
+    if (age >= 0 && age < 60 && String(cache.via || "") === String(proxyUrl || "")) return cache.ip;
   }
-
   let ip = "unavailable";
-  const curl = getCurl();
-  if (curl) {
-    const args = ["-s", "--max-time", "8"];
-    if (proxyUrl) args.push("--proxy", proxyUrl);
-    args.push(traceUrl);
-    const out = invokeCurl(args);
-    if (out) {
-      const match = out.match(/^ip=(.+)$/m);
-      if (match) ip = match[1].trim();
-    }
+  let country = "";
+  const args = ["-s", "--max-time", "8"];
+  if (proxyUrl) args.push("--proxy", proxyUrl);
+  args.push(traceUrl);
+  const trace = parseTrace(invokeCurl(args, 10000));
+  if (trace.ip) {
+    ip = trace.ip;
+    country = String(trace.loc || "").toUpperCase();
   }
-
   if (ip !== "unavailable") {
-    writeTextFile(ipCacheFile, JSON.stringify({
-      ip,
-      at: Math.floor(Date.now() / 1000),
-      via: proxyUrl || ""
-    }, null, 2) + "\n");
+    writeTextFile(ipCacheFile, JSON.stringify({ ip, country, at: Math.floor(Date.now() / 1000), via: proxyUrl || "" }, null, 2) + "\n");
   }
   return ip;
+}
+
+function getEgressCountry(proxyUrl) {
+  const cache = getJson(ipCacheFile);
+  if (cache && cache.country && String(cache.via || "") === String(proxyUrl || "")) return cache.country;
+  getEgressIp(proxyUrl, true);
+  const fresh = getJson(ipCacheFile);
+  return fresh && fresh.country ? fresh.country : "";
+}
+
+function resolveOpenCode() {
+  return ocInfo.findExe();
+}
+
+function runOc(args, timeoutMs) {
+  const oc = resolveOpenCode();
+  try {
+    const out = execFileSync(oc, args, {
+      encoding: "utf8",
+      timeout: Number(timeoutMs || 10000),
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+    return String(out || "");
+  } catch (error) {
+    return error && error.stdout ? String(error.stdout) : "";
+  }
 }
 
 function getOrgId(cfg) {
   if (cfg.orgId) return cfg.orgId;
   try {
-    const oc = resolveOpenCode();
-    const raw = childProcess.execSync(`"${oc}" api get /api/provider`, {
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "ignore"],
-      timeout: 10000
-    });
-    const json = JSON.parse(raw);
-    if (Array.isArray(json?.data)) {
-      for (const provider of json.data) {
-        if (provider.id === "opencode" && provider.headers && provider.headers["x-opencode-org-id"]) {
-          const org = provider.headers["x-opencode-org-id"];
-          if (org) {
-            cfg.orgId = org;
-            saveConfig(cfg);
-            return org;
-          }
-        }
-      }
+    const info = ocInfo.info();
+    if (info && info.orgId) {
+      cfg.orgId = info.orgId;
+      saveConfig(cfg);
+      return info.orgId;
     }
-  } catch {}
+  } catch {
+    void 0;
+  }
   return "";
 }
 
 function newProbeResult(code, body) {
   let state = "unknown";
-  if (code === 429 && body.includes("FreeUsageLimitError")) {
-    state = "exhausted";
-  } else if (code === 400 && body.includes("x-opencode-org-id")) {
-    state = "unknown";
-  } else if (code > 0) {
-    state = "fresh";
-  } else {
-    state = "error";
-  }
+  if (code === 429 && body.includes("FreeUsageLimitError")) state = "exhausted";
+  else if (code === 400 && body.includes("x-opencode-org-id")) state = "unknown";
+  else if (code > 0) state = "fresh";
+  else state = "error";
   return { state, status: code, body };
 }
 
 function invokeQuotaProbe(cfg) {
   const org = getOrgId(cfg);
   let model = cfg.model || defaultModel;
-  if (model.includes("/")) {
-    model = model.split("/").pop();
-  }
-  const payload = JSON.stringify({
-    model,
-    messages: [{ role: "user", content: "1" }],
-    max_tokens: 1,
-    stream: false
-  });
-
-  const curl = getCurl();
-  if (curl) {
-    const tmp = path.join(os.tmpdir(), "unlimited-probe-" + newHex(6) + ".json");
-    writeTextFile(tmp, payload);
+  if (model.includes("/")) model = model.split("/").pop();
+  const idState = identity.load();
+  const projectId = (idState && idState.projectId) || newHex(20);
+  const payload = JSON.stringify({ model, messages: [{ role: "user", content: "1" }], max_tokens: 1, stream: false });
+  const tmp = path.join(os.tmpdir(), "unlimited-probe-" + newHex(6) + ".json");
+  writeTextFile(tmp, payload);
+  try {
+    const args = [
+      "-s", "-o", "-", "-w", "\n%{http_code}",
+      "--max-time", "20",
+      "-X", "POST", gateway,
+      "-H", "Content-Type: application/json",
+      "-H", "User-Agent: opencode/2.2.5",
+      "-H", "x-opencode-client: cli",
+      "-H", "x-opencode-project: " + projectId,
+    ];
+    if (org) args.push("-H", "x-opencode-org-id: " + org);
+    args.push("--data-binary", "@" + tmp);
+    if (cfg.proxy) args.unshift("--proxy", cfg.proxy);
+    const raw = invokeCurl(args, 25000);
+    if (raw) {
+      const idx = raw.lastIndexOf("\n");
+      if (idx > 0) {
+        const body = raw.slice(0, idx).trim();
+        const code = parseInt(raw.slice(idx + 1).trim(), 10) || 0;
+        return newProbeResult(code, body);
+      }
+    }
+  } finally {
     try {
-      const curlArgs = [
-        "-s", "-o", "-", "-w", "\n%{http_code}",
-        "--max-time", "20",
-        "-X", "POST", gateway,
-        "-H", "Content-Type: application/json",
-        "-H", "User-Agent: opencode/2.2.5",
-        "-H", "x-opencode-client: cli",
-        "-H", `x-opencode-project: ${newHex(20)}`
-      ];
-      if (org) {
-        curlArgs.push("-H", `x-opencode-org-id: ${org}`);
-      }
-      curlArgs.push("--data-binary", `@${tmp}`);
-      if (cfg.proxy) {
-        curlArgs.unshift("--proxy", cfg.proxy);
-      }
-      const raw = invokeCurl(curlArgs);
-      if (raw) {
-        const idx = raw.lastIndexOf("\n");
-        if (idx > 0) {
-          const body = raw.slice(0, idx).trim();
-          const code = parseInt(raw.slice(idx + 1).trim(), 10) || 0;
-          return newProbeResult(code, body);
-        }
-      }
-    } finally {
-      try { fs.unlinkSync(tmp); } catch {}
+      fs.unlinkSync(tmp);
+    } catch {
+      void 0;
     }
   }
-
   return { state: "error", status: 0, body: "probe execution failed" };
 }
 
-function getBucketLabel(state) {
-  switch (state) {
-    case "fresh":
-      return "RAW OK - the direct API accepted this request";
-    case "exhausted":
-      return "RAW 429 - direct API refused; this does not measure the app quota";
-    case "unknown":
-      return "UNKNOWN - could not read the gate";
-    default:
-      return "ERROR - probe failed";
-  }
-}
-
-function newIdentity(quiet = false) {
-  const id = newHex(20);
-  let dir;
-  if (process.platform === "win32") {
-    const drive = process.env.SystemDrive || "C:";
-    dir = path.join(drive, "dev", "workspace-" + newHex(4));
-  } else {
-    dir = path.join(userHome, "dev", "workspace-" + newHex(4));
-  }
-  const identity = {
-    projectId: id,
-    clientId: "cli",
-    directory: dir,
-    createdAt: new Date().toISOString()
-  };
-  const json = JSON.stringify(identity, null, 2) + "\n";
-  writeTextFile(identityFile, json);
-  const legacyDir = path.dirname(legacyIdentity);
-  if (fs.existsSync(legacyDir)) {
-    writeTextFile(legacyIdentity, json);
-  }
-  if (!quiet) {
-    writeOk("project id  " + id);
-    writeOk("directory   " + dir);
-    writeInfo(`written to ${identityFile}`);
-  }
-  return identity;
-}
-
-function getIdentity() {
-  for (const p of [identityFile, legacyIdentity]) {
-    const parsed = getJson(p);
-    if (parsed && parsed.projectId) return parsed;
-  }
-  return null;
+function bucketLabel(state) {
+  if (state === "fresh") return "RAW OK - the direct API accepted this request";
+  if (state === "exhausted") return "RAW 429 - direct API refused; this does not measure the app quota";
+  if (state === "unknown") return "UNKNOWN - could not read the gate";
+  return "ERROR - probe failed";
 }
 
 function getDatabasePath() {
-  const p = path.join(dataDir, "opencode.db");
-  if (fs.existsSync(p)) return p;
-  return "";
+  return ocInfo.findDatabase() || "";
 }
 
-function testNodeSqlite() {
-  try {
-    const { DatabaseSync } = require("node:sqlite");
-    return typeof DatabaseSync === "function";
-  } catch {
-    return false;
-  }
-}
-
-function convertToDbPath(inputPath) {
-  let full = inputPath;
-  try {
-    full = fs.realpathSync(inputPath);
-  } catch {}
-  return full.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
-}
-
-function updateProjectIds(targetDirectory) {
+function openDb() {
   const dbPath = getDatabasePath();
-  if (!dbPath) {
-    writeWarn(`opencode.db not found at ${dataDir}`);
-    return false;
-  }
-  if (!testNodeSqlite()) {
-    writeWarn("node 22.5+ required for -Db rotation, skipped");
-    return false;
-  }
-  try {
-    const { DatabaseSync } = require("node:sqlite");
-    const db = new DatabaseSync(dbPath);
-    const want = targetDirectory ? convertToDbPath(targetDirectory) : "";
-    let targetIds = [];
-    if (want) {
-      let hit = [];
-      try {
-        hit = db.prepare(
-          "select project_id, directory from project_directory where lower(replace(directory, char(92), '/')) = ? or lower(replace(directory, char(92), '/')) like ? || '/%'"
-        ).all(want, want);
-      } catch {}
-
-      if (!hit.length) {
-        try {
-          hit = db.prepare(
-            "select id as project_id, worktree as directory from project where lower(replace(worktree, char(92), '/')) = ? or lower(replace(worktree, char(92), '/')) like ? || '/%'"
-          ).all(want, want);
-        } catch {}
-      }
-
-      if (!hit.length) {
-        const knownSet = new Set();
-        try {
-          const pRows = db.prepare("select worktree as directory from project where worktree is not null and id != 'global' order by worktree").all();
-          for (const r of pRows) if (r.directory) knownSet.add(r.directory);
-        } catch {}
-        try {
-          const pdRows = db.prepare("select directory from project_directory order by directory").all();
-          for (const r of pdRows) if (r.directory) knownSet.add(r.directory);
-        } catch {}
-        writeBad("no project matches: " + want);
-        for (const k of knownSet) writeInfo("  " + k);
-        db.close();
-        return false;
-      }
-
-      const exact = hit.filter((r) =>
-        (r.directory || "").replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase() === want
-      );
-      targetIds = exact.length
-        ? [...new Set(exact.map((r) => r.project_id))]
-        : [...new Set(hit.map((r) => r.project_id))];
-    }
-    const tables = db.prepare("select name from sqlite_master where type='table'").all();
-    const carriers = [];
-    for (const table of tables) {
-      const columns = db.prepare("pragma table_info(" + table.name + ")").all().map((c) => c.name);
-      if (columns.includes("project_id")) carriers.push(table.name);
-    }
-    const projects = targetIds.length
-      ? db.prepare(`select id from project where id in (${targetIds.map(() => "?").join(",")})`).all(...targetIds)
-      : db.prepare("select id from project where id != 'global'").all();
-    if (!projects.length) {
-      writeBad("project row missing for " + (want || "all"));
-      db.close();
-      return false;
-    }
-    db.exec("begin");
-    db.exec("pragma defer_foreign_keys = ON");
-    let renamed = 0;
-    let touched = 0;
-    for (const project of projects) {
-      const next = newHex(20);
-      db.prepare("update project set id = ? where id = ?").run(next, project.id);
-      for (const table of carriers) {
-        const key = table === "project" ? "id" : "project_id";
-        const info = db.prepare("update " + table + " set " + key + " = ? where " + key + " = ?").run(next, project.id);
-        touched += Number(info.changes || 0);
-      }
-      renamed += 1;
-    }
-    db.exec("commit");
-    db.close();
-    writeOk(`projects rotated: ${renamed}, rows updated: ${touched}`);
-    return true;
-  } catch (err) {
-    writeBad("failed to update project IDs: " + err.message);
-    return false;
-  }
+  if (!dbPath) return null;
+  const db = new DatabaseSync(dbPath);
+  db.exec("pragma busy_timeout = 8000");
+  return db;
 }
 
-function removeStuckErrors() {
-  const dbPath = getDatabasePath();
-  if (!dbPath || !testNodeSqlite()) return;
-  try {
-    const { DatabaseSync } = require("node:sqlite");
-    const db = new DatabaseSync(dbPath);
-    let removed = 0;
-    const patterns = ["%FreeUsageLimitError%", "%provider.free-limit%", "%Free usage limit reached%"];
-    const tables = db.prepare("select name from sqlite_master where type='table'").all();
-    for (const table of tables) {
-      const columns = db.prepare("pragma table_info(" + table.name + ")").all().map((c) => c.name);
-      const text = columns.filter((c) => c !== "id" && c !== "session_id");
-      if (!text.length) continue;
-      const where = patterns.map((p) => text.map((c) => `\`${c}\` like ?`).join(" or ")).join(" or ");
-      const params = [];
-      for (let i = 0; i < patterns.length; i++) {
-        for (let j = 0; j < text.length; j++) params.push(patterns[i]);
-      }
-      try {
-        const info = db.prepare("delete from " + table.name + " where " + where).run(...params);
-        removed += Number(info.changes || 0);
-      } catch {}
-    }
+function normalizeFolder(value) {
+  let target = String(value || "");
+  if (target && fs.existsSync(target)) {
     try {
-      db.prepare("update session_v2 set idle_outcome = 'succeeded' where idle_outcome = 'failed'").run();
-    } catch {}
-    db.close();
-    writeInfo(`stuck limit rows removed: ${removed}`);
-  } catch {}
-}
-
-function installSlashCommand() {
-  const cmdRoot = path.join(configDir, "commands");
-  try { fs.unlinkSync(path.join(cmdRoot, "opencode-unlimited.md")); } catch {}
-  try { fs.rmSync(path.join(cmdRoot, "opencode-unlimited"), { recursive: true, force: true }); } catch {}
-
-  const cli = path.join(scriptDir, "opencode-unlimited");
-  const tail = "\n\nAnswer with one short line about what the output above reported. No more.";
-  const defs = {
-    "opencode-unlimited": { args: "status", desc: "OpenCode free-tier helper - project id, egress ip, bucket" },
-    "opencode-unlimited:test": { args: "test", desc: "check the free bucket on this IP (free)" },
-    "opencode-unlimited:reset": { args: "reset", desc: "rotate a project (path optional), clear stuck limit errors" },
-    "opencode-unlimited:id": { args: "id", desc: "rotate a project id, pass a folder to pick which" }
-  };
-  const argNames = ["opencode-unlimited:reset", "opencode-unlimited:id"];
-
-  let cfg = readGlobalConfig();
-  if (!cfg) {
-    writeWarn("could not parse global config, slash commands skipped");
-    return;
-  }
-
-  if (!cfg.commands || typeof cfg.commands !== "object") {
-    cfg.commands = {};
-  }
-
-  for (const [name, def] of Object.entries(defs)) {
-    let argText = def.args;
-    if (argNames.includes(name)) {
-      argText = `${argText} "$ARGUMENTS"`;
+      target = fs.realpathSync(target);
+    } catch {
+      void 0;
     }
-    const template = `!\`"${cli}" ${argText}\`${tail}`;
-    cfg.commands[name] = {
-      description: def.desc,
-      template
-    };
   }
-
-  saveGlobalConfig(cfg);
-  writeOk("slash commands: " + Object.keys(defs).join(", "));
+  return target.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
 }
 
-function getGlobalConfigPath() {
-  const jsonc = path.join(configDir, "opencode.jsonc");
-  if (fs.existsSync(jsonc)) return jsonc;
+// ---- plugin / global config (JSONC-aware, comment-preserving) ----
+
+function globalConfigPath() {
+  const jsoncPath = path.join(configDir, "opencode.jsonc");
+  if (fs.existsSync(jsoncPath)) return jsoncPath;
   return path.join(configDir, "opencode.json");
 }
 
 function readGlobalConfig() {
-  const cfgPath = getGlobalConfigPath();
-  if (fs.existsSync(cfgPath)) {
-    const raw = readTextFile(cfgPath);
-    try {
-      const cleaned = raw.replace(/\/\*[\s\S]*?\*\/|([^:]|^)\/\/.*$/gm, "$1");
-      return JSON.parse(cleaned);
-    } catch {
-      return null;
-    }
+  const file = globalConfigPath();
+  if (!fs.existsSync(file)) return {};
+  try {
+    return jsonc.parseJsonc(readTextFile(file) || "");
+  } catch {
+    return null;
   }
-  return {};
 }
 
-function saveGlobalConfig(cfg) {
-  const cfgPath = getGlobalConfigPath();
-  writeTextFile(cfgPath, JSON.stringify(cfg, null, 2) + "\n");
-}
-
-function getRegisteredPlugins(cfg) {
+function registeredPlugins(cfg) {
   if (!cfg || !cfg.plugins) return [];
   if (Array.isArray(cfg.plugins)) return cfg.plugins;
   if (typeof cfg.plugins === "string" && cfg.plugins) return [cfg.plugins];
   return [];
 }
 
-function testPluginRegistered() {
+function pluginRegistered() {
   const cfg = readGlobalConfig();
   if (!cfg) return false;
-  return getRegisteredPlugins(cfg).includes(pluginEntry);
+  return registeredPlugins(cfg).includes(pluginEntry);
 }
 
-function registerPluginEntry(enabled) {
+function setPluginRegistered(enabled) {
   const cfg = readGlobalConfig();
-  if (!cfg) return false;
-  const list = getRegisteredPlugins(cfg).filter((p) => p !== pluginEntry);
-  if (enabled) {
-    list.push(pluginEntry);
+  if (!cfg) {
+    writeWarn("could not parse global config, plugin entry skipped");
+    return false;
   }
+  const list = registeredPlugins(cfg).filter((entry) => entry !== pluginEntry);
+  if (enabled) list.push(pluginEntry);
   cfg.plugins = list;
   try {
-    saveGlobalConfig(cfg);
+    jsonc.updateJsoncFile(globalConfigPath(), { plugins: list });
     return true;
-  } catch (err) {
-    writeWarn(`global config not written: ${err.message}`);
+  } catch (error) {
+    writeWarn("global config not written: " + error.message);
     return false;
   }
 }
 
-function testPluginLive() {
+function pluginLive() {
   if (fs.existsSync(pluginMarker)) {
     try {
       const marker = JSON.parse(fs.readFileSync(pluginMarker, "utf8"));
       if (marker && marker.loaded === true) return marker;
-    } catch {}
+    } catch {
+      void 0;
+    }
   }
   return null;
 }
 
 function installPlugin() {
   if (!fs.existsSync(bundledPlugin)) {
-    writeBad(`bundled plugin missing: ${bundledPlugin}`);
+    writeBad("bundled plugin missing: " + bundledPlugin);
     return false;
   }
-  if (!fs.existsSync(pluginFolder)) {
-    fs.mkdirSync(pluginFolder, { recursive: true });
-  }
+  paths.ensureDir(pluginFolder);
   fs.copyFileSync(bundledPlugin, pluginFile);
-  if (!registerPluginEntry(true)) return false;
-  writeOk(`plugin installed and listed in opencode config: ${pluginEntry}`);
+  if (!setPluginRegistered(true)) return false;
+  writeOk("plugin installed and listed in opencode config: " + pluginEntry);
   return true;
 }
 
-function getPluginState() {
+function pluginState() {
   const present = fs.existsSync(pluginFile);
-  const listed = testPluginRegistered();
-  if (present && listed) {
-    const live = testPluginLive();
-    if (live) return "loaded";
-    return "enabled (waiting for a server load)";
-  }
+  const listed = pluginRegistered();
+  if (present && listed) return pluginLive() ? "loaded" : "enabled (waiting for a server load)";
   if (present || listed) return "partial";
   return "missing";
 }
 
 function setPluginEnabled(enabled) {
-  const disabled = pluginFile + ".off";
   if (enabled) {
     if (!fs.existsSync(pluginFile)) {
-      if (fs.existsSync(disabled)) {
-        if (!fs.existsSync(pluginFolder)) fs.mkdirSync(pluginFolder, { recursive: true });
-        fs.renameSync(disabled, pluginFile);
-      } else if (fs.existsSync(bundledPlugin)) {
-        if (!fs.existsSync(pluginFolder)) fs.mkdirSync(pluginFolder, { recursive: true });
+      if (fs.existsSync(bundledPlugin)) {
+        paths.ensureDir(pluginFolder);
         fs.copyFileSync(bundledPlugin, pluginFile);
       }
     }
-    registerPluginEntry(true);
+    setPluginRegistered(true);
     return;
   }
-  registerPluginEntry(false);
+  setPluginRegistered(false);
 }
+
+function installSlashCommands() {
+  const cfg = readGlobalConfig();
+  if (!cfg) {
+    writeWarn("could not parse global config, slash commands skipped");
+    return;
+  }
+  const cli = scriptPath;
+  const tail = "\n\nAnswer with one short line about what the output above reported. No more.";
+  const defs = {
+    "opencode-unlimited": { args: "status", desc: "OpenCode free-tier helper - identity, egress ip, bucket" },
+    "opencode-unlimited:reset": { args: 'reset "$ARGUMENTS"', desc: "rotate identity, clear stuck limit errors" },
+    "opencode-unlimited:identity": { args: "identity", desc: "show or rotate the virtual device id" },
+    "opencode-unlimited:block": { args: "block", desc: "egress addresses seen today and which are spent" },
+    "opencode-unlimited:usage": { args: "usage", desc: "meter state for today and the reset clock" },
+    "opencode-unlimited:watch": { args: "watch --follow --auto", desc: "tail the log, rotate when a limit lands" },
+    "opencode-unlimited:hunt": { args: 'hunt "$ARGUMENTS"', desc: "rotate until the probe says the route is open" },
+    "opencode-unlimited:token": { args: 'token "$ARGUMENTS"', desc: "save or restore the local auth snapshot" },
+    "opencode-unlimited:reid": { args: 'reid "$ARGUMENTS"', desc: "re-id sessions in a folder, messages kept" },
+    "opencode-unlimited:model": { args: 'model "$ARGUMENTS"', desc: "list providers or switch a folder model" },
+    "opencode-unlimited:clear": { args: 'clear "$ARGUMENTS"', desc: "strip stored free-limit errors" },
+  };
+  const commands = cfg.commands && typeof cfg.commands === "object" ? cfg.commands : {};
+  for (const [name, def] of Object.entries(defs)) {
+    commands[name] = { description: def.desc, template: "!" + JSON.stringify(cli) + " " + def.args + "`" + tail };
+    // OpenCode command templates use backtick-wrapped shell; keep the legacy shape:
+    commands[name].template = "`" + cli + " " + def.args + "`" + tail;
+  }
+  try {
+    jsonc.updateJsoncFile(globalConfigPath(), { commands });
+    writeOk("slash commands: " + Object.keys(defs).join(", "));
+  } catch (error) {
+    writeWarn("slash commands not written: " + error.message);
+  }
+}
+
+function removeSlashCommands() {
+  const cfg = readGlobalConfig();
+  if (!cfg || !cfg.commands || typeof cfg.commands !== "object") return;
+  const commands = { ...cfg.commands };
+  let removed = 0;
+  for (const name of Object.keys(commands)) {
+    if (name.startsWith("opencode-unlimited")) {
+      delete commands[name];
+      removed += 1;
+    }
+  }
+  if (removed) {
+    try {
+      jsonc.updateJsoncFile(globalConfigPath(), { commands });
+      writeOk("slash commands removed");
+    } catch {
+      writeWarn("config not touched, edit it by hand: " + globalConfigPath());
+    }
+  }
+}
+
+// ---- service env / bridge ----
 
 function setServiceEnv(name, value) {
   const oc = resolveOpenCode();
   try {
-    if (!value) {
-      childProcess.execSync(`"${oc}" service unset env ${name}`, { stdio: "ignore" });
-    } else {
-      childProcess.execSync(`"${oc}" service set env ${name} "${value}"`, { stdio: "ignore" });
-    }
-  } catch {}
+    if (!value) execFileSync(oc, ["service", "unset", "env", name], { stdio: "ignore", timeout: 10000 });
+    else execFileSync(oc, ["service", "set", "env", name, value], { stdio: "ignore", timeout: 10000 });
+  } catch {
+    void 0;
+  }
 }
 
 function restartService() {
   const oc = resolveOpenCode();
   writeInfo("restarting background service");
   try {
-    childProcess.execSync(`"${oc}" service restart`, { stdio: "ignore" });
+    execFileSync(oc, ["service", "restart"], { stdio: "ignore", timeout: 20000 });
   } catch {
     writeWarn("service restart failed");
   }
 }
 
-function getBridgePid() {
-  const raw = readTextFile(pidFile);
-  if (raw && /^\d+$/.test(raw.trim())) {
-    return parseInt(raw.trim(), 10);
-  }
+function bridgePid() {
+  const raw = readTextFile(bridgePidFile);
+  if (raw && /^\d+$/.test(raw.trim())) return parseInt(raw.trim(), 10);
   return 0;
 }
 
-function isProcessRunning(pid) {
+function processRunning(pid) {
   if (!pid || pid <= 0) return false;
   try {
     process.kill(pid, 0);
@@ -696,64 +499,61 @@ function isProcessRunning(pid) {
   }
 }
 
-function startBridge(cfg) {
-  const bridgePid = getBridgePid();
-  if (bridgePid > 0 && isProcessRunning(bridgePid)) {
-    writeInfo(`bridge already running (pid ${bridgePid})`);
+async function startBridge(cfg) {
+  const existing = bridgePid();
+  if (existing > 0 && processRunning(existing)) {
+    writeInfo("bridge already running (pid " + existing + ")");
     return true;
   }
   if (!fs.existsSync(bridgeJs)) {
-    writeBad(`bridge script missing: ${bridgeJs}`);
+    writeBad("bridge script missing: " + bridgeJs);
     return false;
   }
   try {
-    const outFd = fs.openSync(logFile, "a");
-    const child = childProcess.spawn(
-      process.execPath,
-      [bridgeJs, "--listen", `127.0.0.1:${cfg.bridgePort}`, "--upstream", cfg.proxy, "--log", logFile],
-      {
-        detached: true,
-        stdio: ["ignore", outFd, outFd]
-      }
-    );
+    paths.ensureDir(path.dirname(bridgeLogFile));
+    const outFd = fs.openSync(bridgeLogFile, "a");
+    const child = spawn(process.execPath, [bridgeJs, "--listen", "127.0.0.1:" + cfg.bridgePort, "--upstream", cfg.proxy, "--log", bridgeLogFile], {
+      detached: true,
+      stdio: ["ignore", outFd, outFd],
+    });
     child.unref();
-    writeTextFile(pidFile, String(child.pid));
-
-    const start = Date.now();
-    while (Date.now() - start < 800) {
-      // spin briefly
-    }
-    if (isProcessRunning(child.pid)) {
-      writeOk(`bridge up on 127.0.0.1:${cfg.bridgePort} -> ${cfg.proxy}`);
+    writeTextFile(bridgePidFile, String(child.pid));
+    await sleep(400);
+    if (processRunning(child.pid)) {
+      writeOk("bridge up on 127.0.0.1:" + cfg.bridgePort + " -> " + proxyBridge.redactProxyUrl(cfg.proxy));
       return true;
     }
-  } catch (e) {
-    writeBad("failed to spawn bridge: " + e.message);
+  } catch (error) {
+    writeBad("failed to spawn bridge: " + error.message);
     return false;
   }
-  writeBad(`bridge exited, see ${logFile}`);
+  writeBad("bridge exited, see " + bridgeLogFile);
   return false;
 }
 
 function stopBridge() {
-  const bridgePid = getBridgePid();
-  if (bridgePid > 0 && isProcessRunning(bridgePid)) {
+  const pid = bridgePid();
+  if (pid > 0 && processRunning(pid)) {
     try {
-      process.kill(bridgePid, "SIGTERM");
+      process.kill(pid, "SIGTERM");
       writeOk("bridge stopped");
-    } catch {}
+    } catch {
+      void 0;
+    }
   }
-  try { fs.unlinkSync(pidFile); } catch {}
+  try {
+    fs.unlinkSync(bridgePidFile);
+  } catch {
+    void 0;
+  }
 }
 
 function testUpstream(proxyUrl) {
-  const curl = getCurl();
-  if (!curl) return true;
-  const out = invokeCurl(["-s", "--max-time", "10", "--proxy", proxyUrl, traceUrl]);
+  const out = invokeCurl(["-s", "--max-time", "10", "--proxy", proxyUrl, traceUrl], 12000);
   return Boolean(out && out.includes("ip="));
 }
 
-function applyProxy(cfg) {
+async function applyProxy(cfg, options = {}) {
   if (!cfg.proxy) {
     setServiceEnv("HTTPS_PROXY", "");
     setServiceEnv("HTTP_PROXY", "");
@@ -765,12 +565,12 @@ function applyProxy(cfg) {
   let url = cfg.proxy;
   let viaBridge = false;
   if (/^socks5h?:\/\//i.test(url)) {
-    if (!startBridge(cfg)) return false;
-    url = `http://127.0.0.1:${cfg.bridgePort}`;
+    if (!(await startBridge(cfg))) return false;
+    url = "http://127.0.0.1:" + cfg.bridgePort;
     viaBridge = true;
   }
   if (!testUpstream(url)) {
-    writeBad(`upstream not answering: ${cfg.proxy}`);
+    writeBad("upstream not answering: " + proxyBridge.redactProxyUrl(cfg.proxy));
     writeInfo("opencode was not switched, fix the proxy and retry");
     if (viaBridge) stopBridge();
     return false;
@@ -780,631 +580,1162 @@ function applyProxy(cfg) {
   setServiceEnv("HTTP_PROXY", url);
   setServiceEnv("ALL_PROXY", url);
   setServiceEnv("NO_PROXY", "localhost,127.0.0.1");
-  writeOk(`service proxy set: ${url}`);
+  writeOk("service proxy set: " + proxyBridge.redactProxyUrl(url));
+  if (!options.noRestart) restartService();
   return true;
 }
 
-function getWarpCli() {
-  try {
-    const cmd = process.platform === "win32" ? "where warp-cli.exe" : "which warp-cli";
-    const out = childProcess.execSync(cmd, {
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "ignore"]
-    }).trim().split(/\r?\n/)[0];
-    if (out && fs.existsSync(out)) return out;
-  } catch {}
+// ---- flag parsing (POSIX + legacy PowerShell spellings) ----
 
-  const candidates = [
-    "/Applications/Cloudflare WARP.app/Contents/Resources/warp-cli",
-    "/usr/local/bin/warp-cli",
-    "/opt/homebrew/bin/warp-cli",
-    "C:\\Program Files\\Cloudflare\\Cloudflare WARP\\warp-cli.exe",
-    "C:\\Program Files (x86)\\Cloudflare\\Cloudflare WARP\\warp-cli.exe"
-  ];
-  for (const c of candidates) {
-    if (fs.existsSync(c)) return c;
+function parseFlags(rest) {
+  const flags = {};
+  const positional = [];
+  const valueFlags = new Set(["country", "prefix", "limit", "top", "db", "interval"]);
+  for (let i = 0; i < rest.length; i += 1) {
+    const raw = String(rest[i] || "");
+    if (!raw) continue;
+    if (raw.startsWith("-")) {
+      const stripped = raw.replace(/^-+/, "");
+      const eq = stripped.indexOf("=");
+      const name = (eq >= 0 ? stripped.slice(0, eq) : stripped).toLowerCase();
+      if (eq >= 0) {
+        flags[name] = stripped.slice(eq + 1);
+      } else if (valueFlags.has(name) && i + 1 < rest.length && !String(rest[i + 1]).startsWith("-")) {
+        flags[name] = String(rest[++i]);
+      } else {
+        flags[name] = true;
+      }
+      continue;
+    }
+    positional.push(raw);
+  }
+  return { flags, positional };
+}
+
+function hasFlag(flags, ...names) {
+  return names.some((name) => flags[String(name).toLowerCase()] !== undefined && flags[String(name).toLowerCase()] !== false);
+}
+
+function flagValue(flags, ...names) {
+  for (const name of names) {
+    const value = flags[String(name).toLowerCase()];
+    if (value !== undefined && value !== true) return String(value);
   }
   return "";
 }
 
-function cmdInstall() {
+// ---- shared operations ----
+
+async function rotateIdentity(quiet) {
+  const result = identity.rotate();
+  if (!quiet) {
+    writeOk("device id  " + result.deviceId);
+    writeOk("project id " + result.projectId);
+    writeInfo("generation " + result.generation + ", written to " + result.stateFile);
+  }
+  return result;
+}
+
+function clearStoredErrors(scope) {
+  const db = openDb();
+  if (!db) {
+    writeWarn("opencode.db not found, nothing cleared");
+    return "";
+  }
+  try {
+    const message = dbTools.clear(db, scope || "");
+    writeInfo(message);
+    return message;
+  } finally {
+    db.close();
+  }
+}
+
+function verifyDb(apply) {
+  const db = openDb();
+  if (!db) {
+    writeWarn("opencode.db not found, nothing verified");
+    return [];
+  }
+  try {
+    const lines = dbTools.verify(db, Boolean(apply));
+    for (const line of lines) writeInfo(line);
+    return lines;
+  } finally {
+    db.close();
+  }
+}
+
+function reidTarget(target, options = {}) {
+  const db = openDb();
+  if (!db) {
+    writeWarn("opencode.db not found, nothing re-id'd");
+    return null;
+  }
+  try {
+    if (String(target || "").startsWith("ses_")) {
+      const result = sessionReid.reid(db, String(target), {});
+      writeOk("session re-id'd: " + result.oldId + " -> " + result.newId + " (" + result.messages + " messages kept)");
+      return result;
+    }
+    const result = sessionReid.reidAll(db, String(target), { dryRun: Boolean(options.dryRun), limit: Number(options.limit || 0) });
+    if (result.dryRun) {
+      writeInfo("dry run: " + result.total + " sessions under " + result.directory);
+      for (const row of result.results) writeInfo("  " + row.oldId + " messages=" + row.messages + " refs=" + row.refs + " bytes=" + row.bytes);
+    } else {
+      writeOk("sessions re-id'd: " + result.reid + "/" + result.total + ", messages kept: " + result.messages);
+      for (const failure of result.failed || []) writeWarn("  " + failure.oldId + ": " + failure.error);
+    }
+    return result;
+  } finally {
+    db.close();
+  }
+}
+
+async function applyHuntedProxy(cfg, huntOptions) {
+  const result = await proxyHunt.hunt(huntOptions || {});
+  if (!result.found) {
+    writeWarn("hunt found no usable exit in the pool, staying on the current route");
+    return null;
+  }
+  writeOk("hunt found " + proxyBridge.redactProxyUrl(result.proxy) + " -> " + result.ip + (result.country ? " (" + result.country + ")" : "") + " in " + result.ms + "ms");
+  cfg.proxy = result.proxy;
+  cfg.ipMode = "proxy";
+  saveConfig(cfg);
+  const applied = await applyProxy(cfg);
+  if (!applied) {
+    writeWarn("hunted proxy failed to apply, state left on manual");
+    cfg.proxy = "";
+    cfg.ipMode = "manual";
+    saveConfig(cfg);
+    return null;
+  }
+  return result;
+}
+
+async function nextPooledProxy(cfg) {
+  const pool = proxyHunt.loadPool();
+  if (!pool.length) {
+    writeWarn("proxy pool is empty, add one with: proxy pool add socks5://host:port");
+    return null;
+  }
+  const ranked = proxyHealth.rank(pool, { limit: 0 });
+  const ordered = ranked.proxies;
+  const index = Number(cfg.poolIndex || 0) % ordered.length;
+  const url = ordered[index];
+  cfg.poolIndex = index + 1;
+  cfg.proxy = url;
+  cfg.ipMode = "proxy";
+  saveConfig(cfg);
+  writeInfo("next proxy: " + proxyBridge.redactProxyUrl(url));
+  const applied = await applyProxy(cfg);
+  if (!applied) {
+    writeWarn("proxy did not apply, pool pointer kept for the next attempt");
+    return null;
+  }
+  return url;
+}
+
+async function rotateRoute(cfg, options = {}) {
+  const pool = proxyHunt.loadPool();
+  if (options.hunt && pool.length) return applyHuntedProxy(cfg, { country: options.country, prefix: options.prefix, limit: options.limit });
+  if (pool.length) return nextPooledProxy(cfg);
+  writeInfo("no proxy pool configured, route unchanged (manual IP)");
+  return null;
+}
+
+async function watcherRotate(event) {
+  const cfg = getConfig();
+  await rotateIdentity(true);
+  clearStoredErrors("");
+  await rotateRoute(cfg, { hunt: true });
+  const ip = getEgressIp(cfg.proxy, true);
+  writeInfo("watcher rotated, egress " + ip);
+  return { ip, run: (event && event.run) || "" };
+}
+
+// ---- commands ----
+
+async function cmdInstall() {
   writeStep("==> installing opencode-unlimited");
   installPlugin();
-  installSlashCommand();
+  installSlashCommands();
   const cfg = getConfig();
   const org = getOrgId(cfg);
-  if (org) {
-    writeOk(`org id discovered: ${org}`);
-  } else {
-    writeWarn("org id not discovered yet, run opencode once and retry");
-  }
+  if (org) writeOk("org id discovered: " + org);
+  else writeWarn("org id not discovered yet, run opencode once and retry");
   saveConfig(cfg);
-
-  if (!getIdentity()) {
-    newIdentity();
-  }
+  if (!identity.load()) await rotateIdentity(false);
   writeStep("");
   writeOk("done. try: opencode-unlimited status");
 }
 
-function getPathArg(rest) {
-  for (const item of rest) {
-    if (!item) continue;
-    if (item === "-Db" || item === "--db") continue;
-    if (item.startsWith("-")) continue;
-    return item;
-  }
-  return "";
-}
-
-function getDbFlag(rest) {
-  return rest.includes("-Db") || rest.includes("--db");
-}
-
-function cmdId(rest) {
-  writeStep("==> rotating project identity");
+async function cmdOn(rest) {
+  const { flags } = parseFlags(rest);
+  const keepId = hasFlag(flags, "keepid", "keep-id");
+  const noProbe = hasFlag(flags, "noprobe", "no-probe");
+  const noStart = hasFlag(flags, "nostart", "no-start");
+  const keepRoute = hasFlag(flags, "keeproute", "keep-route");
   const cfg = getConfig();
-  const target = getPathArg(rest);
-  const before = getIdentity();
-  const identity = newIdentity();
-  if (target) {
-    writeInfo(`target: ${target}`);
-    updateProjectIds(target);
-  } else if (cfg.rotateDb || getDbFlag(rest)) {
-    updateProjectIds();
+  writeStep("==> opencode-unlimited on");
+  writeInfo("platform " + process.platform + " (" + os.type() + " " + os.release() + " " + os.arch() + "), node " + process.version);
+  const exe = resolveOpenCode();
+  writeInfo("opencode " + exe);
+  const dbPath = getDatabasePath();
+  writeInfo("database " + (dbPath || "not found yet"));
+
+  if (!keepId) {
+    writeStep("[1/6] identity");
+    await rotateIdentity(false);
   } else {
-    writeInfo("database rows untouched, use -Db or a path to rotate them");
-  }
-  if (before) {
-    writeInfo(`was ${before.projectId}`);
-  }
-  saveConfig(cfg);
-  writeOk("identity rotated");
-}
-
-function cmdReset(rest) {
-  writeStep("==> full reset");
-  const cfg = getConfig();
-  const target = getPathArg(rest);
-  const ipBefore = getEgressIp(cfg.proxy, true);
-  writeInfo(`egress ip before: ${ipBefore}`);
-
-  writeStep("[1/4] rotating project identity");
-  const identity = newIdentity();
-  if (target) {
-    writeInfo(`target: ${target}`);
-    updateProjectIds(target);
-  } else if (cfg.rotateDb || getDbFlag(rest)) {
-    updateProjectIds();
-  } else {
-    writeInfo("database rows untouched, sessions stay on the old id");
-  }
-  removeStuckErrors();
-
-  writeStep("[2/4] proxy path");
-  if (cfg.proxy) {
-    applyProxy(cfg);
-    restartService();
-  } else {
-    writeInfo("manual mode, no proxy configured");
+    writeStep("[1/6] identity");
+    writeInfo("kept current device id");
+    if (!identity.load()) await rotateIdentity(false);
   }
 
-  writeStep("[3/4] egress ip after");
-  const startWait = Date.now();
-  while (Date.now() - startWait < 1000) {}
-  const ipAfter = getEgressIp(cfg.proxy, true);
-  cfg.lastIp = ipAfter;
-  saveConfig(cfg);
-  if (ipAfter === ipBefore) {
-    writeWarn(`ip unchanged: ${ipAfter}`);
-  } else {
-    writeOk(`new egress ip: ${ipAfter}`);
-  }
-
-  writeStep("[4/4] direct api probe");
-  const probe = invokeQuotaProbe(cfg);
-  cfg.lastBucket = probe.state;
-  saveConfig(cfg);
-  if (probe.state === "fresh") {
-    writeOk(getBucketLabel(probe.state));
-  } else {
-    writeWarn(getBucketLabel(probe.state));
-  }
-  writeInfo("a prompt that works is the real signal, or: opencode-unlimited test -live");
-  writeStep("");
-  writeOk("reset complete");
-  writeInfo(`project id: ${identity.projectId}`);
-}
-
-function cmdTest(rest) {
-  const cfg = getConfig();
-  if (rest.includes("-live") || rest.includes("--live")) {
-    const oc = resolveOpenCode();
-    let model = cfg.model || defaultModel;
-    if (!model.includes("/")) {
-      model = `opencode/${model}`;
+  writeStep("[2/6] model");
+  try {
+    const info = ocInfo.info();
+    const free = info && Array.isArray(info.freeModels) ? info.freeModels : [];
+    if (free.length) {
+      cfg.model = free.includes(defaultModel) ? defaultModel : free[0];
+      saveConfig(cfg);
+      writeOk("free model: " + cfg.model);
+    } else {
+      writeInfo("no free model advertised, keeping " + cfg.model);
     }
-    writeStep("==> live check through the app (uses one message)");
+  } catch {
+    writeInfo("model detection skipped, keeping " + cfg.model);
+  }
+
+  writeStep("[3/6] proxy pool");
+  let pool = proxyHunt.loadPool();
+  if (!pool.length) {
+    writeInfo("pool empty, fetching a public list");
     try {
-      const res = childProcess.spawnSync(oc, ["run", "-m", model, "reply with: ok"], {
-        encoding: "utf8",
-        timeout: 45000
-      });
-      const out = (res.stdout || "") + "\n" + (res.stderr || "");
-      if (/Free usage limit reached|used today's free messages/i.test(out)) {
-        writeBad("EMPTY - the app itself is blocked on this connection");
-        return;
-      }
-      if (res.status === 0 && /\bok\b/i.test(out)) {
-        writeOk("WORKING - the app answered, keep prompting");
-        return;
-      }
-      writeWarn("could not confirm, output:");
-      const lines = out.split("\n").filter((l) => l.trim()).slice(0, 4);
-      writeInfo(lines.join(" "));
-    } catch (e) {
-      writeWarn("failed to run live test: " + e.message);
+      const fetched = await proxyHunt.fetchList(proxyHunt.DEFAULT_LIST_URL);
+      pool = proxyHunt.loadPool();
+      writeOk("pool loaded: " + fetched.proxies.length + " candidates");
+    } catch (error) {
+      writeWarn("could not load a public list (" + error.message + "), continuing direct");
     }
-    return;
+  } else {
+    writeOk("pool: " + pool.length + " proxies");
   }
 
-  writeStep("==> direct api probe (free, but not the app quota)");
-  const ip = getEgressIp(cfg.proxy);
-  writeInfo(`egress ip: ${ip}`);
-  const probe = invokeQuotaProbe(cfg);
-  cfg.lastBucket = probe.state;
-  cfg.lastIp = ip;
-  saveConfig(cfg);
-  if (probe.state === "fresh") {
-    writeOk(getBucketLabel(probe.state));
+  if (!keepRoute) {
+    writeStep("[4/6] route");
+    if (pool.length) {
+      const hunted = await applyHuntedProxy(cfg, {});
+      if (!hunted) writeInfo("staying on the direct connection");
+    } else {
+      writeInfo("direct connection, no pool to walk");
+    }
+    if (!noProbe) {
+      const probe = invokeQuotaProbe(cfg);
+      cfg.lastBucket = probe.state;
+      saveConfig(cfg);
+      if (probe.state === "fresh") writeOk(bucketLabel(probe.state));
+      else writeWarn(bucketLabel(probe.state));
+    }
   } else {
-    writeWarn(getBucketLabel(probe.state));
+    writeStep("[4/6] route");
+    writeInfo("kept current route");
   }
-  writeInfo("the app has its own quota; a prompt that works means you are fine");
-  writeInfo("real answer: opencode-unlimited test -live");
+
+  writeStep("[5/6] sessions");
+  clearStoredErrors("");
+  const cwd = process.cwd();
+  try {
+    const db = openDb();
+    if (db) {
+      try {
+        const schema = ocInfo.detectSchema(db, { deep: true });
+        if (schema.sessionTable && schema.directoryColumn) {
+          const ids = sessionReid.sessionsUnder(db, schema, cwd);
+          if (ids.length) {
+            writeInfo("re-id'ing " + ids.length + " sessions in " + cwd);
+            reidTarget(cwd, {});
+          } else {
+            writeInfo("no sessions in this folder yet");
+          }
+        }
+      } finally {
+        db.close();
+      }
+    }
+  } catch (error) {
+    writeWarn("session pass skipped: " + error.message);
+  }
+  verifyDb(true);
+
+  writeStep("[6/6] plugin + watcher");
+  installPlugin();
+  setPluginEnabled(true);
+  if (!noStart) {
+    const started = watcher.startBackground({ cliPath: scriptPath });
+    if (started.started) writeOk("watcher started (pid " + started.pid + ")");
+    else writeInfo("watcher already running (pid " + started.pid + ")");
+    const agent = watcher.installLaunchAgent({ cliPath: scriptPath, nodePath: process.execPath });
+    if (agent.installed) {
+      if (agent.loaded) writeOk("autostart registered: " + agent.plist);
+      else writeWarn("autostart plist written but launchctl failed: " + (agent.error || ""));
+    } else {
+      writeWarn("autostart skipped: " + (agent.reason || ""));
+    }
+  } else {
+    writeInfo("watcher start skipped (--no-start)");
+  }
+
+  const ip = getEgressIp(cfg.proxy, true);
+  const country = getEgressCountry(cfg.proxy);
+  writeStep("");
+  writeOk("on complete, egress " + ip + (country ? " (" + country + ")" : ""));
+  writeInfo("the watcher rotates on its own when a limit line lands");
 }
 
-function cmdStatus() {
+async function cmdOff() {
+  writeStep("==> opencode-unlimited off");
+  watcher.stopBackground();
+  writeOk("watcher stopped");
+  const agent = watcher.uninstallLaunchAgent();
+  writeOk("autostart removed: " + agent.plist);
+  setPluginEnabled(false);
+  try {
+    fs.unlinkSync(pluginMarker);
+  } catch {
+    void 0;
+  }
+  writeOk("plugin unlisted");
+  const cfg = getConfig();
+  cfg.proxy = "";
+  cfg.ipMode = "manual";
+  saveConfig(cfg);
+  stopBridge();
+  await applyProxy(cfg);
+  writeOk("direct egress restored");
+}
+
+async function cmdStatus() {
   const cfg = getConfig();
   writeStep("==> opencode-unlimited status");
   writeStep("");
   writeStep("identity");
-  const id = getIdentity();
-  if (id) {
-    writeInfo(`project id : ${id.projectId}`);
-    writeInfo(`directory  : ${id.directory}`);
-    writeInfo(`updated    : ${id.createdAt}`);
+  const idState = identity.load();
+  if (idState) {
+    writeInfo("device id  : " + idState.deviceId);
+    writeInfo("project id : " + idState.projectId);
+    writeInfo("generation : " + idState.generation);
   } else {
-    writeWarn("no identity yet, run: opencode-unlimited id");
+    writeWarn("no identity yet, run: opencode-unlimited identity rotate");
   }
   writeStep("");
   writeStep("plugin");
-  writeInfo(`state      : ${getPluginState()}`);
-  writeInfo(`path       : ${pluginFile}`);
-  writeInfo(`config     : ${testPluginRegistered() ? pluginEntry + " listed" : "not listed, so opencode never loads it"}`);
-  const live = testPluginLive();
-  if (live) {
-    writeInfo(`loaded     : opencode ${live.version}, hooks ${Array.isArray(live.hooks) ? live.hooks.join(", ") : ""}, at ${live.at}`);
-  }
+  writeInfo("state      : " + pluginState());
+  writeInfo("path       : " + pluginFile);
+  writeInfo("config     : " + (pluginRegistered() ? pluginEntry + " listed" : "not listed, so opencode never loads it"));
+  const live = pluginLive();
+  if (live) writeInfo("loaded     : opencode " + (live.version || "") + ", hooks " + (Array.isArray(live.hooks) ? live.hooks.join(", ") : "") + ", at " + live.at);
   writeStep("");
   writeStep("network");
-  writeInfo(`egress ip  : ${getEgressIp(cfg.proxy)}`);
-  writeInfo(`ipMode     : ${cfg.ipMode}`);
-  writeInfo(`upstream   : ${cfg.proxy ? cfg.proxy : "none (manual)"}`);
-  const bridgePid = getBridgePid();
-  if (bridgePid > 0 && isProcessRunning(bridgePid)) {
-    writeInfo(`bridge     : running (pid ${bridgePid}, port ${cfg.bridgePort})`);
-  } else {
-    writeInfo("bridge     : stopped");
-  }
-  const warp = getWarpCli();
-  writeInfo(`warp-cli   : ${warp ? warp : "not installed (optional)"}`);
+  writeInfo("egress ip  : " + getEgressIp(cfg.proxy));
+  writeInfo("ipMode     : " + cfg.ipMode);
+  writeInfo("upstream   : " + (cfg.proxy ? proxyBridge.redactProxyUrl(cfg.proxy) : "none (manual)"));
+  const pid = bridgePid();
+  writeInfo("bridge     : " + (pid > 0 && processRunning(pid) ? "running (pid " + pid + ", port " + cfg.bridgePort + ")" : "stopped"));
+  const watch = watcher.isRunning();
+  writeInfo("watcher    : " + (watch.running ? "running (pid " + watch.pid + ")" : "stopped") + ", autostart " + (watcher.isLoaded() ? "loaded" : "not loaded"));
+  writeStep("");
+  writeStep("ledger");
+  const ledger = egress.show();
+  writeInfo("blocks today: " + ledger.total + " (" + ledger.spent + " spent), reset in " + ledger.secondsToReset + "s");
   writeStep("");
   writeStep("direct api");
   const probe = invokeQuotaProbe(cfg);
   cfg.lastBucket = probe.state;
+  cfg.lastIp = getEgressIp(cfg.proxy);
+  saveConfig(cfg);
+  if (probe.state === "fresh") writeOk(bucketLabel(probe.state));
+  else writeWarn(bucketLabel(probe.state));
+  writeInfo("app quota   : not measured here, see: opencode-unlimited test --live");
+}
+
+async function cmdUsage(rest) {
+  const { flags } = parseFlags(rest);
+  const cfg = getConfig();
+  writeStep("==> opencode-unlimited usage");
+  const ledger = egress.show();
   const ip = getEgressIp(cfg.proxy);
+  const country = getEgressCountry(cfg.proxy);
+  const current = egress.check({ ip });
+  writeInfo("egress ip   : " + ip + (country ? " (" + country + ")" : ""));
+  writeInfo("block       : " + (current.block || "unknown"));
+  writeInfo("spent today : " + (current.spent ? "yes" : "no"));
+  writeInfo("blocks seen : " + ledger.total + " (" + ledger.spent + " spent)");
+  writeInfo("reset at    : " + ledger.nextResetUtc + " (" + ledger.secondsToReset + "s)");
+  if (hasFlag(flags, "check")) {
+    writeStep("");
+    writeInfo("spending one real message through the app...");
+    await cmdTest(["--live"]);
+  }
+}
+
+async function cmdTest(rest) {
+  const { flags } = parseFlags(rest);
+  const cfg = getConfig();
+  if (hasFlag(flags, "live")) {
+    const oc = resolveOpenCode();
+    let model = cfg.model || defaultModel;
+    if (!model.includes("/")) model = "opencode/" + model;
+    writeStep("==> live check through the app (uses one message)");
+    const res = spawnSync(oc, ["run", "-m", model, "reply with: ok"], { encoding: "utf8", timeout: 45000 });
+    const out = String(res.stdout || "") + "\n" + String(res.stderr || "");
+    if (/Free usage limit reached|used today's free messages/i.test(out)) {
+      writeBad("EMPTY - the app itself is blocked on this connection");
+      egress.record({ ip: getEgressIp(cfg.proxy, true), status: 429, country: getEgressCountry(cfg.proxy) });
+      return;
+    }
+    if (res.status === 0 && /\bok\b/i.test(out)) {
+      writeOk("WORKING - the app answered, keep prompting");
+      egress.record({ ip: getEgressIp(cfg.proxy, true), status: 200, country: getEgressCountry(cfg.proxy) });
+      return;
+    }
+    writeWarn("could not confirm, output:");
+    writeInfo(out.split("\n").filter((line) => line.trim()).slice(0, 4).join(" "));
+    return;
+  }
+  writeStep("==> direct api probe (free, but not the app quota)");
+  const ip = getEgressIp(cfg.proxy);
+  writeInfo("egress ip: " + ip);
+  const probe = invokeQuotaProbe(cfg);
+  cfg.lastBucket = probe.state;
   cfg.lastIp = ip;
   saveConfig(cfg);
-  if (probe.state === "fresh") {
-    writeOk(getBucketLabel(probe.state));
+  if (probe.state === "fresh") writeOk(bucketLabel(probe.state));
+  else writeWarn(bucketLabel(probe.state));
+  writeInfo("the app has its own quota; a prompt that works means you are fine");
+  writeInfo("real answer: opencode-unlimited test --live");
+}
+
+async function cmdReset(rest) {
+  const { flags, positional } = parseFlags(rest);
+  const cfg = getConfig();
+  const target = positional[0] || "";
+  const dry = hasFlag(flags, "dry");
+  const keepIds = hasFlag(flags, "keepids", "keep-ids", "keepid", "keep-id");
+  const hunt = hasFlag(flags, "hunt");
+  writeStep("==> full reset");
+  const ipBefore = getEgressIp(cfg.proxy, true);
+  writeInfo("egress ip before: " + ipBefore);
+
+  writeStep("[1/5] identity");
+  if (dry) writeInfo("dry run: identity would rotate");
+  else if (!keepIds) await rotateIdentity(false);
+  else writeInfo("kept current device id");
+
+  writeStep("[2/5] stored limit errors");
+  if (dry) writeInfo("dry run: stored errors would be cleared" + (target ? " under " + target : " everywhere"));
+  else clearStoredErrors(target);
+
+  writeStep("[3/5] session ids");
+  if (dry) {
+    if (target && !keepIds) reidTarget(target, { dryRun: true });
+    else writeInfo("dry run: no session changes");
+  } else if (target && !keepIds) {
+    reidTarget(target, {});
+  } else if (keepIds) {
+    writeInfo("kept session ids");
   } else {
-    writeWarn(getBucketLabel(probe.state));
+    writeInfo("no folder given, sessions stay on the old id");
   }
-  writeInfo("app quota   : not measured here, see: opencode-unlimited test -live");
+
+  writeStep("[4/5] route");
+  if (dry) writeInfo("dry run: route unchanged");
+  else await rotateRoute(cfg, { hunt });
+
+  writeStep("[5/5] verify + egress");
+  if (!dry) verifyDb(true);
+  const ipAfter = getEgressIp(cfg.proxy, true);
+  cfg.lastIp = ipAfter;
+  saveConfig(cfg);
+  if (ipAfter === ipBefore) writeWarn("ip unchanged: " + ipAfter + " (same block stays spent until 00:00 UTC)");
+  else writeOk("new egress ip: " + ipBefore + " -> " + ipAfter);
+  const probe = invokeQuotaProbe(cfg);
+  cfg.lastBucket = probe.state;
+  saveConfig(cfg);
+  if (probe.state === "fresh") writeOk(bucketLabel(probe.state));
+  else writeWarn(bucketLabel(probe.state));
+  writeStep("");
+  writeOk("reset complete");
 }
 
-function cmdOn() {
-  installPlugin();
-  setPluginEnabled(true);
-  writeOk("identity plugin enabled and registered");
+async function cmdId(rest) {
+  const { positional } = parseFlags(rest);
+  writeStep("==> rotating project identity");
+  const target = positional[0] || "";
+  const before = identity.load();
+  const result = await rotateIdentity(false);
+  if (target) {
+    writeInfo("target: " + target);
+    reidTarget(target, {});
+  } else {
+    writeInfo("database rows untouched, pass a folder to re-id its sessions");
+  }
+  if (before) writeInfo("was " + before.projectId);
+  void result;
+  writeOk("identity rotated");
 }
 
-function cmdOff() {
-  setPluginEnabled(false);
-  try { fs.unlinkSync(pluginMarker); } catch {}
-  writeOk("identity plugin disabled and unlisted");
+async function cmdIdentity(rest) {
+  const { positional } = parseFlags(rest);
+  const sub = (positional[0] || "show").toLowerCase();
+  if (sub === "rotate") {
+    writeStep("==> rotating identity");
+    await rotateIdentity(false);
+    return;
+  }
+  if (sub === "restore") {
+    writeStep("==> restoring identity");
+    const result = identity.restore();
+    if (result.restored) writeOk("identity state removed, real machine id untouched");
+    else writeWarn("no identity state to remove");
+    return;
+  }
+  writeStep("==> identity");
+  const shown = identity.show();
+  for (const [key, value] of Object.entries(shown)) writeInfo(key + " : " + value);
 }
 
-function cmdPlugin(rest) {
-  const sub = rest.length >= 1 ? rest[0] : "status";
-  switch (sub.toLowerCase()) {
-    case "install":
-      writeStep("==> installing the shield plugin");
-      if (installPlugin()) {
-        setPluginEnabled(true);
-        writeInfo("opencode reloads config on save, the plugin appears at the next request");
-        writeInfo("check it with: opencode-unlimited plugin status");
+async function cmdSessions(rest) {
+  const { positional } = parseFlags(rest);
+  const dbPath = getDatabasePath();
+  if (!dbPath) {
+    writeBad("opencode.db not found");
+    process.exitCode = 1;
+    return;
+  }
+  writeStep("==> sessions");
+  const rows = ocInfo.listSessions(dbPath, positional[0] || "");
+  if (!rows.length) {
+    writeWarn("no sessions found" + (positional[0] ? " under " + positional[0] : ""));
+    return;
+  }
+  for (const row of rows) {
+    writeInfo(row.id + "  " + row.directory + "  messages=" + row.messages + " bytes=" + row.bytes + (row.title ? "  " + row.title : ""));
+  }
+  writeInfo(rows.length + " sessions");
+}
+
+async function cmdReid(rest) {
+  const { flags, positional } = parseFlags(rest);
+  const target = positional[0] || "";
+  if (!target) {
+    writeBad("usage: opencode-unlimited reid <ses_id|folder> [--dry]");
+    process.exitCode = 2;
+    return;
+  }
+  writeStep("==> reid " + target);
+  reidTarget(target, { dryRun: hasFlag(flags, "dry"), limit: Number(flagValue(flags, "limit") || 0) });
+}
+
+async function cmdModel(rest) {
+  const { positional } = parseFlags(rest);
+  writeStep("==> model");
+  const dbPath = getDatabasePath();
+  if (!dbPath) {
+    writeBad("opencode.db not found");
+    process.exitCode = 1;
+    return;
+  }
+  if (!positional.length) {
+    const listed = modelSwitch.listModels();
+    if (!listed.providers.length) {
+      writeWarn("no providers with credentials in auth.json");
+      return;
+    }
+    for (const provider of listed.providers) {
+      writeInfo(provider.providerID + ": " + provider.models.length + " models");
+      for (const model of provider.models.slice(0, 12)) {
+        writeInfo("  " + model.id + (model.free ? " (free)" : "") + " context=" + model.context);
       }
-      break;
-    case "off":
-      setPluginEnabled(false);
-      try { fs.unlinkSync(pluginMarker); } catch {}
-      writeOk("plugin unlisted from opencode config and parked on disk");
-      break;
-    case "verify":
-      restartService();
-      setTimeout(() => {
-        const live = testPluginLive();
-        if (live) writeOk(`loaded, hooks ${Array.isArray(live.hooks) ? live.hooks.join(", ") : ""}`);
-        else writeWarn("not reported by the server yet, open the app once and check again");
-      }, 1500);
-      break;
-    default: {
-      writeStep("==> shield plugin");
-      writeInfo(`state  : ${getPluginState()}`);
-      writeInfo(`path   : ${pluginFile}`);
-      writeInfo(`config : ${testPluginRegistered() ? pluginEntry + " listed" : "not listed"}`);
-      const live = testPluginLive();
-      if (live) {
-        writeOk(`live   : opencode ${live.version}, hooks ${Array.isArray(live.hooks) ? live.hooks.join(", ") : ""}`);
-        writeInfo("it stamps the virtual project id and session affinity on every model request");
-      } else {
-        writeInfo("live   : not reported yet");
-      }
-      break;
+    }
+    writeInfo("switch with: opencode-unlimited model <folder|ses_id> provider/model");
+    return;
+  }
+  const spec = positional[positional.length - 1];
+  const target = positional.length > 1 ? positional[0] : process.cwd();
+  const db = openDb();
+  try {
+    const result = modelSwitch.setModel(db, { target, spec, force: false });
+    writeOk("model set: " + result.spec + " on " + result.changed.length + " sessions");
+  } finally {
+    db.close();
+  }
+}
+
+async function cmdClear(rest) {
+  const { positional } = parseFlags(rest);
+  writeStep("==> clear stored limit errors");
+  clearStoredErrors(positional[0] || "");
+  writeOk("clear done");
+}
+
+async function cmdVerify(rest) {
+  const { flags } = parseFlags(rest);
+  writeStep("==> verify");
+  verifyDb(hasFlag(flags, "fix"));
+}
+
+async function cmdBlock(rest) {
+  const { positional } = parseFlags(rest);
+  const sub = (positional[0] || "show").toLowerCase();
+  const cfg = getConfig();
+  if (sub === "check") {
+    writeStep("==> block check");
+    const ip = getEgressIp(cfg.proxy, true);
+    const country = getEgressCountry(cfg.proxy);
+    const state = egress.check({ ip });
+    writeInfo("egress ip : " + ip + (country ? " (" + country + ")" : ""));
+    writeInfo("block     : " + (state.block || "unknown"));
+    writeInfo("spent     : " + (state.spent ? "yes, until " + state.resetAt : "no"));
+    writeInfo("open/refused: " + state.open + "/" + state.refused);
+    return;
+  }
+  if (sub === "clear") {
+    egress.clear();
+    writeOk("egress ledger cleared");
+    return;
+  }
+  writeStep("==> egress blocks today");
+  const ledger = egress.show();
+  writeInfo("day " + ledger.day + ", reset " + ledger.nextResetUtc + " (" + ledger.secondsToReset + "s)");
+  writeInfo("blocks " + ledger.total + ", spent " + ledger.spent);
+  for (const row of ledger.blocks) {
+    writeInfo((row.spent ? "[spent] " : "[open]  ") + row.block + " " + row.ip + (row.country ? " " + row.country : "") + " open=" + row.open + " refused=" + row.refused);
+  }
+}
+
+async function cmdToken(rest) {
+  const { positional } = parseFlags(rest);
+  const sub = (positional[0] || "show").toLowerCase();
+  const authPath = modelSwitch.authCandidates().find((candidate) => fs.existsSync(candidate)) || "";
+  if (sub === "save") {
+    if (!authPath) {
+      writeBad("auth.json not found");
+      process.exitCode = 1;
+      return;
+    }
+    writeTextFile(authSnapshotFile, readTextFile(authPath) || "");
+    writeOk("auth snapshot saved: " + authSnapshotFile);
+    return;
+  }
+  if (sub === "restore") {
+    if (!fs.existsSync(authSnapshotFile)) {
+      writeBad("no snapshot to restore, run: token save first");
+      process.exitCode = 1;
+      return;
+    }
+    if (!authPath) {
+      writeBad("auth.json location unknown");
+      process.exitCode = 1;
+      return;
+    }
+    writeTextFile(authPath, readTextFile(authSnapshotFile) || "");
+    writeOk("auth snapshot restored: " + authPath);
+    return;
+  }
+  writeStep("==> token");
+  const snapshot = getJson(authSnapshotFile);
+  writeInfo("auth.json : " + (authPath || "not found"));
+  writeInfo("snapshot  : " + (fs.existsSync(authSnapshotFile) ? authSnapshotFile : "none"));
+  if (authPath && fs.existsSync(authPath)) {
+    const auth = getJson(authPath);
+    writeInfo("providers : " + (auth ? Object.keys(auth).join(", ") : "unreadable"));
+  }
+  if (snapshot) writeInfo("snapshot providers: " + Object.keys(snapshot).join(", "));
+}
+
+async function cmdWatch(rest) {
+  const { flags } = parseFlags(rest);
+  const follow = hasFlag(flags, "follow");
+  const auto = hasFlag(flags, "auto");
+  const background = hasFlag(flags, "background");
+  if (background) {
+    const started = watcher.startBackground({ cliPath: scriptPath });
+    writeOk(started.started ? "watcher started (pid " + started.pid + ")" : "watcher already running (pid " + started.pid + ")");
+    return;
+  }
+  if (!follow) {
+    writeStep("==> watch (one pass)");
+    const scan = logWatch.scan({ reset: hasFlag(flags, "all") });
+    writeInfo("log " + (scan.file || "not found"));
+    writeInfo("events rotate=" + scan.counts.rotate + " ask=" + scan.counts.ask + " noop=" + scan.counts.noop);
+    for (const event of scan.events) writeInfo("  " + event.kind + " " + event.at + " " + event.reason);
+    if (scan.counts.rotate && auto) {
+      writeInfo("rotating...");
+      await watcherRotate(scan.events.find((event) => event.kind === "rotate"));
+    }
+    return;
+  }
+  writeStep("==> watch --follow" + (auto ? " --auto" : ""));
+  writeInfo("log " + (logWatch.latestLog() || "not found yet"));
+  await watcher.runDaemon({
+    intervalMs: Number(flagValue(flags, "interval") || 2000),
+    onRotate: auto ? watcherRotate : async () => ({ skipped: true }),
+  });
+}
+
+async function cmdHunt(rest) {
+  const { flags } = parseFlags(rest);
+  const cfg = getConfig();
+  writeStep("==> hunt");
+  const pool = proxyHunt.loadPool();
+  if (!pool.length) {
+    writeWarn("pool is empty, fetching a public list");
+    try {
+      await proxyHunt.fetchList(proxyHunt.DEFAULT_LIST_URL);
+    } catch (error) {
+      writeBad("no proxies available: " + error.message);
+      process.exitCode = 1;
+      return;
     }
   }
+  const result = await applyHuntedProxy(cfg, {
+    country: flagValue(flags, "country"),
+    prefix: flagValue(flags, "prefix"),
+    limit: Number(flagValue(flags, "limit") || 0),
+  });
+  if (!result) {
+    writeBad("hunt exhausted the pool, nothing applied");
+    process.exitCode = 1;
+    return;
+  }
+  const probe = invokeQuotaProbe(cfg);
+  cfg.lastBucket = probe.state;
+  saveConfig(cfg);
+  writeInfo(bucketLabel(probe.state));
 }
 
-function cmdProxy(rest) {
+async function cmdProxy(rest) {
+  const { flags, positional } = parseFlags(rest);
   const cfg = getConfig();
-  const sub = rest.length >= 1 ? rest[0] : "status";
-  switch (sub) {
-    case "off":
-      stopBridge();
+  const sub = (positional[0] || "status").toLowerCase();
+
+  if (sub === "set") {
+    const url = positional[1] || "";
+    if (!url) {
+      writeBad("usage: opencode-unlimited proxy set <socks5://|http://host:port>");
+      process.exitCode = 2;
+      return;
+    }
+    const normalized = proxyHunt.normalizeProxyUrl(url);
+    if (!normalized) {
+      writeBad("not a usable proxy url: " + url);
+      process.exitCode = 2;
+      return;
+    }
+    cfg.proxy = normalized;
+    cfg.ipMode = "proxy";
+    saveConfig(cfg);
+    if (!(await applyProxy(cfg))) {
       cfg.proxy = "";
       cfg.ipMode = "manual";
       saveConfig(cfg);
-      applyProxy(cfg);
-      restartService();
-      writeInfo("egress is direct again");
-      break;
-    case "status":
-      writeInfo(`upstream : ${cfg.proxy ? cfg.proxy : "none (manual)"}`);
-      writeInfo(`bridge   : 127.0.0.1:${cfg.bridgePort}`);
-      writeInfo(`ip       : ${getEgressIp(cfg.proxy)}`);
-      break;
-    default: {
-      const url = sub === "set" && rest.length >= 2 ? rest[1] : rest[0];
-      if (!/^(socks5h?|http|https):\/\//i.test(url)) {
-        writeBad("expected socks5://host:port or http://host:port");
-        return;
-      }
-      cfg.proxy = url;
-      cfg.ipMode = "proxy";
-      if (!applyProxy(cfg)) {
-        cfg.proxy = "";
-        cfg.ipMode = "manual";
-        saveConfig(cfg);
-        writeInfo("state left on manual, nothing was restarted");
-        return;
-      }
-      saveConfig(cfg);
-      restartService();
-      const startWait = Date.now();
-      while (Date.now() - startWait < 1000) {}
-      writeInfo(`egress ip via proxy: ${getEgressIp(cfg.proxy)}`);
-      break;
+      writeInfo("state left on manual, nothing was restarted");
+      return;
     }
+    writeInfo("egress ip via proxy: " + getEgressIp(cfg.proxy, true));
+    return;
+  }
+
+  if (sub === "off") {
+    cfg.proxy = "";
+    cfg.ipMode = "manual";
+    saveConfig(cfg);
+    stopBridge();
+    await applyProxy(cfg);
+    return;
+  }
+
+  if (sub === "next") {
+    await nextPooledProxy(cfg);
+    return;
+  }
+
+  if (sub === "stats") {
+    writeStep("==> proxy stats");
+    const shown = proxyHealth.show(proxyHunt.loadPool());
+    writeInfo("total " + shown.total + ", usable " + shown.usable + ", held " + shown.held);
+    for (const row of shown.rows) {
+      writeInfo(proxyBridge.redactProxyUrl(row.url) + " ok=" + row.ok + " fail=" + row.fail + " ms=" + row.ms + (row.reason ? " " + row.reason : "") + (row.quarantined ? " quarantined until " + new Date(row.until).toISOString() : ""));
+    }
+    return;
+  }
+
+  if (sub === "test") {
+    writeStep("==> proxy test");
+    const result = await proxyHunt.testPool({ top: Number(flagValue(flags, "top") || 0) });
+    writeInfo("tested " + result.total + ", ok " + result.ok);
+    for (const row of result.results) {
+      writeInfo((row.ok && !row.slow ? "[ok]   " : "[bad]  ") + proxyBridge.redactProxyUrl(row.url) + " " + row.ms + "ms" + (row.ip ? " " + row.ip : "") + (row.error ? " " + row.error : ""));
+    }
+    return;
+  }
+
+  if (sub === "healthreset") {
+    proxyHealth.reset();
+    writeOk("proxy health records cleared");
+    return;
+  }
+
+  if (sub === "pool") {
+    const action = (positional[1] || "list").toLowerCase();
+    if (action === "add") {
+      const added = proxyHunt.addToPool(positional[2] || "");
+      writeOk("pool: " + added.pool.length + " proxies, added " + proxyBridge.redactProxyUrl(added.added));
+      return;
+    }
+    if (action === "fetch") {
+      const fetched = await proxyHunt.fetchList(positional[2] || proxyHunt.DEFAULT_LIST_URL, { force: true });
+      writeOk("fetched " + fetched.proxies.length + " candidates, pool now " + proxyHunt.loadPool().length);
+      return;
+    }
+    if (action === "refresh") {
+      const cached = proxyHunt.loadCache();
+      const fetched = await proxyHunt.fetchList((cached && cached.url) || proxyHunt.DEFAULT_LIST_URL, { force: true });
+      writeOk("refreshed " + fetched.proxies.length + " candidates, pool now " + proxyHunt.loadPool().length);
+      return;
+    }
+    if (action === "clear") {
+      proxyHunt.clearPool();
+      writeOk("pool and cached list cleared");
+      return;
+    }
+    writeStep("==> proxy pool");
+    const pool = proxyHunt.loadPool();
+    writeInfo(proxyHunt.poolFile() + ": " + pool.length + " proxies");
+    for (const url of pool) writeInfo("  " + proxyBridge.redactProxyUrl(url));
+    return;
+  }
+
+  writeStep("==> proxy");
+  writeInfo("upstream : " + (cfg.proxy ? proxyBridge.redactProxyUrl(cfg.proxy) : "none (manual)"));
+  writeInfo("ipMode   : " + cfg.ipMode);
+  writeInfo("pool     : " + proxyHunt.loadPool().length + " proxies");
+  writeInfo("egress ip: " + getEgressIp(cfg.proxy));
+}
+
+function getWarpCli() {
+  const candidates = [
+    "/Applications/Cloudflare WARP.app/Contents/Resources/warp-cli",
+    "/usr/local/bin/warp-cli",
+    "/opt/homebrew/bin/warp-cli",
+    path.join(homeDir, ".local", "bin", "warp-cli"),
+  ];
+  for (const candidate of candidates) {
+    if (fs.existsSync(candidate)) return candidate;
+  }
+  try {
+    const out = execFileSync("/usr/bin/which", ["warp-cli"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+    const first = String(out || "").trim().split(/\r?\n/)[0];
+    if (first && fs.existsSync(first)) return first;
+  } catch {
+    void 0;
+  }
+  return "";
+}
+
+function runWarp(warp, args) {
+  try {
+    return execFileSync(warp, args, { encoding: "utf8", timeout: 15000, stdio: ["ignore", "pipe", "ignore"] });
+  } catch (error) {
+    return error && error.stdout ? String(error.stdout) : "";
   }
 }
 
-function cmdWarp(rest) {
+async function cmdWarp(rest) {
+  const { positional } = parseFlags(rest);
   const warp = getWarpCli();
   if (!warp) {
     writeBad("warp-cli not found, install Cloudflare WARP or use: proxy set socks5://host:port");
     return;
   }
   const cfg = getConfig();
-  const sub = rest.length >= 1 ? rest[0] : "status";
-  switch (sub) {
-    case "on":
-      try {
-        childProcess.execSync(`"${warp}" mode proxy`, { stdio: "ignore" });
-        childProcess.execSync(`"${warp}" proxy port 40000`, { stdio: "ignore" });
-        childProcess.execSync(`"${warp}" connect`, { stdio: "ignore" });
-      } catch {}
-      cfg.proxy = "socks5://127.0.0.1:40000";
-      cfg.ipMode = "warp";
-      saveConfig(cfg);
-      applyProxy(cfg);
-      restartService();
-      writeOk("warp proxy mode on, opencode routed through the bridge");
-      break;
-    case "off":
-      try {
-        childProcess.execSync(`"${warp}" disconnect`, { stdio: "ignore" });
-      } catch {}
-      stopBridge();
-      cfg.proxy = "";
-      cfg.ipMode = "manual";
-      saveConfig(cfg);
-      applyProxy(cfg);
-      restartService();
-      writeOk("warp off, direct egress");
-      break;
-    case "rotate": {
-      writeInfo("reconnecting warp, this can change the egress ip");
-      const before = getEgressIp(cfg.proxy);
-      try {
-        childProcess.execSync(`"${warp}" disconnect`, { stdio: "ignore" });
-      } catch {}
-      let startWait = Date.now();
-      while (Date.now() - startWait < 2000) {}
-      try {
-        childProcess.execSync(`"${warp}" connect`, { stdio: "ignore" });
-      } catch {}
-      startWait = Date.now();
-      while (Date.now() - startWait < 4000) {}
-      const after = getEgressIp(cfg.proxy);
-      if (after === before) {
-        writeWarn(`ip unchanged: ${after}`);
-        writeInfo("warp does not guarantee a new ip, reconnect again or use a proxy");
-      } else {
-        writeOk(`new egress ip: ${before} -> ${after}`);
-      }
-      break;
-    }
-    default:
-      try {
-        const out = childProcess.execSync(`"${warp}" status`, { encoding: "utf8" });
-        out.split("\n").filter((l) => l.trim()).forEach((l) => writeInfo(l));
-      } catch (e) {
-        writeWarn("warp status error: " + e.message);
-      }
-      break;
+  const sub = (positional[0] || "status").toLowerCase();
+  if (sub === "on") {
+    runWarp(warp, ["mode", "proxy"]);
+    runWarp(warp, ["proxy", "port", "40000"]);
+    runWarp(warp, ["connect"]);
+    cfg.proxy = "socks5://127.0.0.1:40000";
+    cfg.ipMode = "warp";
+    saveConfig(cfg);
+    await applyProxy(cfg);
+    writeOk("warp proxy mode on, opencode routed through the bridge");
+    return;
   }
+  if (sub === "off") {
+    runWarp(warp, ["disconnect"]);
+    stopBridge();
+    cfg.proxy = "";
+    cfg.ipMode = "manual";
+    saveConfig(cfg);
+    await applyProxy(cfg);
+    writeOk("warp off, direct egress");
+    return;
+  }
+  if (sub === "rotate") {
+    writeInfo("reconnecting warp, this can change the egress ip");
+    const before = getEgressIp(cfg.proxy);
+    runWarp(warp, ["disconnect"]);
+    await sleep(2000);
+    runWarp(warp, ["connect"]);
+    await sleep(4000);
+    const after = getEgressIp(cfg.proxy);
+    if (after === before) {
+      writeWarn("ip unchanged: " + after);
+      writeInfo("warp does not guarantee a new ip, reconnect again or use a proxy");
+    } else {
+      writeOk("new egress ip: " + before + " -> " + after);
+    }
+    return;
+  }
+  const out = runWarp(warp, ["status"]);
+  out.split("\n").filter((line) => line.trim()).forEach((line) => writeInfo(line));
 }
 
-function cmdRun(rest) {
-  if (rest.length === 0) {
+async function cmdPlugin(rest) {
+  const { positional } = parseFlags(rest);
+  const sub = (positional[0] || "status").toLowerCase();
+  if (sub === "install") {
+    writeStep("==> installing the shield plugin");
+    if (installPlugin()) {
+      setPluginEnabled(true);
+      writeInfo("opencode reloads its config on save, no restart needed");
+    }
+    return;
+  }
+  if (sub === "off") {
+    writeStep("==> disabling the shield plugin");
+    setPluginEnabled(false);
+    try {
+      fs.unlinkSync(pluginMarker);
+    } catch {
+      void 0;
+    }
+    writeOk("plugin unlisted");
+    return;
+  }
+  writeStep("==> plugin");
+  writeInfo("state  : " + pluginState());
+  writeInfo("path   : " + pluginFile);
+  writeInfo("config : " + (pluginRegistered() ? pluginEntry + " listed" : "not listed"));
+  const live = pluginLive();
+  if (live) writeInfo("loaded : opencode " + (live.version || "") + ", hooks " + (Array.isArray(live.hooks) ? live.hooks.join(", ") : "") + ", at " + live.at);
+  else writeInfo("loaded : not yet (start opencode once)");
+}
+
+async function cmdRun(rest) {
+  if (!rest.length) {
     writeBad("usage: opencode-unlimited run <opencode args>");
+    process.exitCode = 2;
     return;
   }
   const oc = resolveOpenCode();
   let attempt = 1;
   while (attempt <= 3) {
-    try {
-      const res = childProcess.spawnSync(oc, rest, { encoding: "utf8", stdio: "pipe" });
-      const out = (res.stdout || "") + "\n" + (res.stderr || "");
-      if (/Free usage limit reached|used today's free messages/i.test(out)) {
-        writeWarn(`free limit hit (attempt ${attempt}/3)`);
-        cmdId([]);
-        const cfg = getConfig();
-        if (cfg.proxy) {
-          applyProxy(cfg);
-          restartService();
-        }
-        const startWait = Date.now();
-        while (Date.now() - startWait < 2000) {}
-        attempt++;
-        continue;
-      }
-      if (res.stdout) process.stdout.write(res.stdout);
-      if (res.stderr) process.stderr.write(res.stderr);
-      process.exit(res.status ?? 0);
-    } catch (e) {
-      writeBad("execution failed: " + e.message);
-      process.exit(1);
+    const res = spawnSync(oc, rest, { encoding: "utf8" });
+    const out = String(res.stdout || "") + "\n" + String(res.stderr || "");
+    if (/Free usage limit reached|used today's free messages/i.test(out)) {
+      writeWarn("free limit hit (attempt " + attempt + "/3)");
+      egress.record({ ip: getEgressIp(getConfig().proxy, true), status: 429, country: getEgressCountry(getConfig().proxy) });
+      await rotateIdentity(true);
+      const cfg = getConfig();
+      if (cfg.proxy) await applyProxy(cfg);
+      await sleep(2000);
+      attempt += 1;
+      continue;
     }
+    if (res.stdout) process.stdout.write(res.stdout);
+    if (res.stderr) process.stderr.write(res.stderr);
+    process.exit(res.status ?? 0);
   }
   writeBad("still limited after 3 attempts");
-  writeInfo("new id does not refill the quota, change the connection and run: opencode-unlimited test -live");
+  writeInfo("a new id does not refill the quota, change the connection and run: opencode-unlimited test --live");
   process.exit(1);
 }
 
-function cmdDoctor() {
+async function cmdDoctor() {
   writeStep("==> opencode-unlimited doctor");
   writeStep("");
-  writeInfo(`platform   : ${process.platform} (${os.type()} ${os.release()} ${os.arch()})`);
-  writeInfo(`node       : ${process.version}`);
-  if (testNodeSqlite()) {
-    writeOk("sqlite     : node:sqlite available");
-  } else {
-    writeWarn("sqlite     : needs node 22.5+ for -Db features");
-  }
-  if (getCurl()) {
-    writeOk("curl       : found");
-  } else {
-    writeWarn("curl       : missing");
-  }
-  const oc = resolveOpenCode();
-  writeInfo(`opencode   : ${oc}`);
-
+  writeInfo("platform   : " + process.platform + " (" + os.type() + " " + os.release() + " " + os.arch() + ")");
+  writeInfo("node       : " + process.version);
   try {
-    const info = childProcess.execSync(`"${oc}" api get /api/info`, {
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "ignore"],
-      timeout: 5000
-    });
-    const match = info.match(/"version":"([^"]+)"/);
-    if (match) {
-      writeOk(`service    : running, ${match[1]}`);
-    } else {
-      writeWarn("service    : not reachable, start opencode once");
-    }
+    void DatabaseSync;
+    writeOk("sqlite     : node:sqlite available");
   } catch {
-    writeWarn("service    : not reachable, start opencode once");
+    writeWarn("sqlite     : needs node 22.5+ for database features");
   }
-
-  const plLive = testPluginLive();
-  if (plLive) {
-    writeOk(`plugin     : loaded and active (hooks ${Array.isArray(plLive.hooks) ? plLive.hooks.join(", ") : ""})`);
-  } else {
+  if (findCurl()) writeOk("curl       : found");
+  else writeWarn("curl       : missing");
+  const oc = resolveOpenCode();
+  writeInfo("opencode   : " + oc);
+  const info = ocInfo.info({ refresh: true });
+  if (info && info.service && info.service.running) writeOk("service    : running, " + info.version);
+  else writeWarn("service    : not reachable, start opencode once");
+  const dbPath = getDatabasePath();
+  writeInfo("database   : " + (dbPath || "not found"));
+  if (dbPath) {
+    const db = openDb();
     try {
-      const pluginsRaw = childProcess.execSync(`"${oc}" api get /api/plugin`, {
-        encoding: "utf8",
-        stdio: ["ignore", "pipe", "ignore"],
-        timeout: 5000
-      });
-      let found = false;
-      let active = false;
-      try {
-        const pJson = JSON.parse(pluginsRaw);
-        if (Array.isArray(pJson?.data)) {
-          const item = pJson.data.find((p) => p.id === "unlimited-shield");
-          if (item) {
-            found = true;
-            active = item.state?.status === "active" || item.status === "active";
-          }
-        }
-      } catch {
-        found = pluginsRaw.includes('"id":"unlimited-shield"');
-        active = /status["']:\s*["']active/.test(pluginsRaw);
-      }
-
-      if (found) {
-        if (active) {
-          writeOk("plugin     : loaded and active");
-        } else {
-          writeWarn("plugin     : loaded but not active");
-        }
-      } else {
-        writeWarn("plugin     : not loaded (optional, it does not change the quota)");
-      }
-    } catch {
-      writeWarn("plugin     : not loaded (optional, it does not change the quota)");
+      const schema = ocInfo.detectSchema(db, { deep: false });
+      writeInfo("schema     : session table " + (schema.sessionTable || "none"));
+    } finally {
+      db.close();
     }
   }
-
-  const id = getIdentity();
-  if (id && /^[0-9a-f]{40}$/.test(id.projectId)) {
-    writeOk(`identity   : ${id.projectId}`);
-  } else {
-    writeWarn("identity   : missing or invalid, run: opencode-unlimited id");
-  }
-
+  const live = pluginLive();
+  if (live) writeOk("plugin     : loaded and active (hooks " + (Array.isArray(live.hooks) ? live.hooks.join(", ") : "") + ")");
+  else writeWarn("plugin     : not loaded (optional, it does not change the quota)");
+  const idState = identity.load();
+  if (idState && /^[0-9a-f]{40}$/.test(idState.projectId)) writeOk("identity   : " + idState.projectId);
+  else writeWarn("identity   : missing or invalid, run: opencode-unlimited identity rotate");
   const cfg = getConfig();
-  writeInfo(`upstream   : ${cfg.proxy ? cfg.proxy : "none (manual)"}`);
-  writeInfo(`egress ip  : ${getEgressIp(cfg.proxy)}`);
+  writeInfo("upstream   : " + (cfg.proxy ? proxyBridge.redactProxyUrl(cfg.proxy) : "none (manual)"));
+  writeInfo("egress ip  : " + getEgressIp(cfg.proxy));
 }
 
-function cmdUninstall() {
+async function cmdVersion() {
+  writeStep("==> opencode-unlimited version");
+  writeInfo("tool     : " + toolVersion());
+  writeInfo("node     : " + process.version);
+  writeInfo("platform : " + process.platform + " " + os.arch());
+  try {
+    const info = ocInfo.info();
+    writeInfo("opencode : " + (info.version || "not detected"));
+    writeInfo("exe      : " + info.exe);
+    writeInfo("database : " + (info.dbPath || "not found"));
+  } catch (error) {
+    writeWarn("opencode detection failed: " + error.message);
+  }
+}
+
+async function cmdUninstall() {
   writeStep("==> uninstalling opencode-unlimited");
+  watcher.stopBackground();
+  watcher.uninstallLaunchAgent();
+  writeOk("watcher stopped, autostart removed");
   stopBridge();
   setPluginEnabled(false);
-  try { fs.rmSync(pluginFolder, { recursive: true, force: true }); } catch {}
-  try { fs.unlinkSync(pluginFile); } catch {}
-  try { fs.unlinkSync(pluginFile + ".off"); } catch {}
-  try { fs.unlinkSync(pluginMarker); } catch {}
+  try {
+    fs.rmSync(pluginFolder, { recursive: true, force: true });
+  } catch {
+    void 0;
+  }
+  try {
+    fs.unlinkSync(pluginMarker);
+  } catch {
+    void 0;
+  }
   writeOk("plugin removed");
-
-  let cfgPath = path.join(configDir, "opencode.jsonc");
-  if (!fs.existsSync(cfgPath)) cfgPath = path.join(configDir, "opencode.json");
-  if (fs.existsSync(cfgPath)) {
+  removeSlashCommands();
+  const cfg = getConfig();
+  cfg.proxy = "";
+  cfg.ipMode = "manual";
+  saveConfig(cfg);
+  await applyProxy(cfg);
+  writeOk("service proxy cleared");
+  for (const file of [stateFile, bridgePidFile, bridgeLogFile, ipCacheFile, authSnapshotFile]) {
     try {
-      const raw = readTextFile(cfgPath);
-      const cleaned = raw.replace(/\/\*[\s\S]*?\*\/|([^:]|^)\/\/.*$/gm, "$1");
-      const cfg = JSON.parse(cleaned);
-      if (cfg.commands && typeof cfg.commands === "object") {
-        for (const name of Object.keys(cfg.commands)) {
-          if (name.startsWith("opencode-unlimited")) {
-            delete cfg.commands[name];
-          }
-        }
-        writeTextFile(cfgPath, JSON.stringify(cfg, null, 2) + "\n");
-        writeOk("slash commands removed");
-      }
+      fs.unlinkSync(file);
     } catch {
-      writeWarn(`config not touched, edit it by hand: ${cfgPath}`);
+      void 0;
     }
   }
-
-  setServiceEnv("HTTPS_PROXY", "");
-  setServiceEnv("HTTP_PROXY", "");
-  setServiceEnv("ALL_PROXY", "");
-  writeOk("service proxy cleared");
-  try { fs.unlinkSync(stateFile); } catch {}
-  try { fs.unlinkSync(pidFile); } catch {}
-  try { fs.unlinkSync(logFile); } catch {}
   writeOk("state files removed");
-  writeInfo(`repo kept, delete manually if you want: ${rootDir}`);
+  writeInfo("repo kept, delete manually if you want: " + rootDir);
 }
 
 function cmdHelp() {
-  writeStep("opencode-unlimited <command>");
+  writeStep("opencode-unlimited <command>  (macOS)");
   writeStep("");
-  writeInfo("install              deploy plugin, register PATH, write state");
-  writeInfo("reset [path] [-Db]   rotate a project, clear stuck errors, verify");
-  writeInfo("id [path] [-Db]      rotate the header id, or one project by folder");
-  writeInfo("test [-live]         direct probe (free) or a real app check (costs 1 message)");
-  writeInfo("status               identity, plugin, network, bucket");
-  writeInfo("plugin [action]      shield plugin: install, off, verify, status");
-  writeInfo("on | off             enable or disable the identity plugin");
-  writeInfo("proxy set <url>      route opencode through socks5:// or http://");
-  writeInfo("proxy off            drop the upstream, direct egress");
-  writeInfo("proxy status         show the current upstream");
-  writeInfo("warp on|off|rotate   Cloudflare WARP path (optional)");
-  writeInfo("run <args...>        run opencode, rotate on free-limit");
-  writeInfo("doctor               check node, service, plugin, identity");
-  writeInfo("uninstall            remove plugin, slash commands, state");
+  const rows = [
+    ["on [--keep-id] [--no-probe] [--no-start] [--keep-route]", "full auto: identity, model, pool, verified route, sessions, plugin, watcher, autostart"],
+    ["off", "stop watcher, remove autostart, unlist plugin, direct egress"],
+    ["status", "identity, plugin, network, ledger"],
+    ["usage [--check]", "meter state for today and the reset clock"],
+    ["test [--live]", "direct probe (free) or a real app check (costs 1 message)"],
+    ["reset [folder] [--dry] [--keep-ids] [--hunt]", "new device id, clear stored errors, re-id folder, verify"],
+    ["id [folder]", "rotate the header id, optionally re-id one folder"],
+    ["identity [show|rotate|restore]", "virtual device id and its generation"],
+    ["sessions [folder]", "list sessions with ids, folders and sizes"],
+    ["reid <ses_id|folder> [--dry]", "new session id, every message kept"],
+    ["model [provider/model]", "providers with credentials and their free models, or switch"],
+    ["clear [folder]", "strip stored free-limit errors"],
+    ["verify [--fix]", "check for orphaned rows and invalid state"],
+    ["block [show|check|clear]", "egress addresses seen today and which are spent"],
+    ["token [show|save|restore]", "local auth.json snapshot"],
+    ["watch [--follow] [--auto] [--background]", "read the log for a limit line, no message spent"],
+    ["hunt [--country DE] [--prefix 2a00:] [--limit N]", "rotate until the probe says the route is open"],
+    ["proxy set <url> | off | next | stats | test | healthreset", "route OpenCode through a proxy"],
+    ["proxy pool [add|fetch|refresh|clear]", "manage the proxy pool"],
+    ["plugin [status|install|off]", "shield plugin: state, path, config entry, live hooks"],
+    ["warp on|off|rotate", "optional Cloudflare WARP path"],
+    ["run <args...>", "run opencode, rotate on free-limit"],
+    ["doctor", "node, service, schema, plugin, egress"],
+    ["version", "tool version plus detected OpenCode version"],
+    ["install", "deploy plugin, slash commands, state"],
+    ["uninstall", "remove plugin, slash commands, state"],
+  ];
+  for (const [command, desc] of rows) {
+    writeInfo(command.padEnd(52) + " " + desc);
+  }
 }
 
-const command = (process.argv[2] || "help").toLowerCase();
-const rest = process.argv.slice(3);
-
-switch (command) {
-  case "install":
-    cmdInstall();
-    break;
-  case "reset":
-    cmdReset(rest);
-    break;
-  case "id":
-    cmdId(rest);
-    break;
-  case "test":
-    cmdTest(rest);
-    break;
-  case "status":
-    cmdStatus();
-    break;
-  case "plugin":
-    cmdPlugin(rest);
-    break;
-  case "on":
-    cmdOn();
-    break;
-  case "off":
-    cmdOff();
-    break;
-  case "proxy":
-    cmdProxy(rest);
-    break;
-  case "warp":
-    cmdWarp(rest);
-    break;
-  case "run":
-    cmdRun(rest);
-    break;
-  case "doctor":
-    cmdDoctor();
-    break;
-  case "uninstall":
-    cmdUninstall();
-    break;
-  default:
+async function main() {
+  const command = String(process.argv[2] || "help").toLowerCase();
+  const rest = process.argv.slice(3);
+  const routes = {
+    install: cmdInstall,
+    on: cmdOn,
+    off: cmdOff,
+    status: cmdStatus,
+    usage: cmdUsage,
+    test: cmdTest,
+    reset: cmdReset,
+    id: cmdId,
+    identity: cmdIdentity,
+    sessions: cmdSessions,
+    reid: cmdReid,
+    model: cmdModel,
+    clear: cmdClear,
+    verify: cmdVerify,
+    block: cmdBlock,
+    token: cmdToken,
+    watch: cmdWatch,
+    hunt: cmdHunt,
+    proxy: cmdProxy,
+    warp: cmdWarp,
+    plugin: cmdPlugin,
+    run: cmdRun,
+    doctor: cmdDoctor,
+    version: cmdVersion,
+    uninstall: cmdUninstall,
+  };
+  if (command === "help" || command === "--help" || command === "-h") {
     cmdHelp();
-    break;
+    return;
+  }
+  const handler = routes[command];
+  if (!handler) {
+    writeBad("unknown command: " + command);
+    cmdHelp();
+    process.exitCode = 2;
+    return;
+  }
+  await handler(rest);
 }
+
+main().catch((error) => {
+  writeBad(String((error && error.message) || error));
+  process.exitCode = 1;
+});

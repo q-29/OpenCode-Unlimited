@@ -10,22 +10,30 @@ permissions:
 
 jobs:
   build:
-    runs-on: windows-latest
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
 
+      - name: setup node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: tests
+        run: npm test
+
       - name: build artifact
-        shell: pwsh
         env:
           RELEASE_TAG: ${{ github.ref_name }}
-        run: ./scripts/release.ps1
+        run: ./scripts/release.sh
 
       - name: publish
-        shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
-          $version = $env:RELEASE_TAG.TrimStart("v")
-          $zip = "dist/OpenCode-Unlimited-$version.zip"
-          gh release create $env:RELEASE_TAG $zip --title $env:RELEASE_TAG --generate-notes
+          version="${RELEASE_TAG#v}"
+          gh release create "$RELEASE_TAG" \
+            "dist/OpenCode-Unlimited-$version.zip" \
+            "dist/OpenCode-Unlimited-$version.tar.gz" \
+            --title "$RELEASE_TAG" --generate-notes
