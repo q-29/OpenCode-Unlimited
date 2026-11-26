@@ -6,7 +6,14 @@ const path = require("node:path");
 const os = require("node:os");
 const crypto = require("node:crypto");
 const { execFileSync, spawn, spawnSync } = require("node:child_process");
-const { DatabaseSync } = require("node:sqlite");
+// node:sqlite needs Node >= 22.5. Load lazily so `help`/`version` still
+// work on older Node; database commands check for null and warn.
+let DatabaseSync = null;
+try {
+  DatabaseSync = require("node:sqlite").DatabaseSync;
+} catch {
+  DatabaseSync = null;
+}
 
 // Resolve the real script location so symlinks in /usr/local/bin,
 // /opt/homebrew/bin or ~/.local/bin still find lib/ and plugins/.
@@ -291,6 +298,10 @@ function getDatabasePath() {
 }
 
 function openDb() {
+  if (!DatabaseSync) {
+    writeError("sqlite not available: Node must be >= 22.5 (--experimental-sqlite was built in at 22.5)");
+    return null;
+  }
   const dbPath = getDatabasePath();
   if (!dbPath) return null;
   const db = new DatabaseSync(dbPath);
